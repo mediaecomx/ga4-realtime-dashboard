@@ -1,0 +1,7 @@
+streamlit
+pandas
+matplotlib
+google-analytics-data
+google-auth
+streamlit-cookies-manager
+protobuf
