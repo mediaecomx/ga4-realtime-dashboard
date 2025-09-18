@@ -7,27 +7,33 @@ from google.oauth2 import service_account
 import time
 from datetime import datetime
 from streamlit_cookies_manager import EncryptedCookieManager
+import json ### MỚI: Thêm thư viện json
 
 # --- CẤU HÌNH ---
-# Property ID từ GA4 của bạn
 PROPERTY_ID = "501726461"
-# Khoảng thời gian làm mới (giây)
 REFRESH_INTERVAL_SECONDS = 60
 
+### MỚI: Tải các quy tắc mapping từ file JSON khi ứng dụng khởi động ###
+# encoding='utf-8' rất quan trọng để đọc được các icon
+try:
+    with open('marketer_mapping.json', 'r', encoding='utf-8') as f:
+        marketer_map = json.load(f)
+except FileNotFoundError:
+    st.error("Lỗi: Không tìm thấy file marketer_mapping.json. Vui lòng tải file này lên GitHub.")
+    st.stop()
+
+
 # --- XÁC THỰC VÀ COOKIES ---
-# Khởi tạo cookie manager, sử dụng khóa mã hóa từ file secrets
 cookies = EncryptedCookieManager(
     password=st.secrets["cookie"]["encrypt_key"],
 )
 
 def check_credentials(username, password):
-    # Đọc thông tin đăng nhập từ file secrets
     correct_username = st.secrets["credentials"]["username"]
     correct_password = st.secrets["credentials"]["password"]
     return username == correct_username and password == correct_password
 
 # --- KẾT NỐI GOOGLE ANALYTICS ---
-# Khởi tạo kết nối an toàn bằng thông tin từ file secrets
 try:
     credentials = service_account.Credentials.from_service_account_info(
         st.secrets["google_credentials"],
@@ -36,7 +42,7 @@ try:
     client = BetaAnalyticsDataClient(credentials=credentials)
 except Exception as e:
     st.error(f"Lỗi khi khởi tạo Google Client: {e}")
-    st.stop() # Dừng script nếu không thể kết nối
+    st.stop()
 
 # --- GIAO DIỆN ---
 st.markdown("""
@@ -51,17 +57,25 @@ st.markdown("""
 # --- HÀM LẤY DỮ LIỆU ---
 def fetch_realtime_data():
     try:
-        # 1. Request cho số liệu tổng
+        # 1. Lệnh gọi API riêng cho 5 phút
+        five_min_request = RunRealtimeReportRequest(
+            property=f"properties/{PROPERTY_ID}",
+            metrics=[Metric(name="activeUsers")],
+            minute_ranges=[MinuteRange(start_minutes_ago=4, end_minutes_ago=0)]
+        )
+        five_min_response = client.run_realtime_report(five_min_request)
+        active_users_5min_api = int(five_min_response.totals[0].metric_values[0].value) if five_min_response.totals else 0
+
+        # ... (các request khác giữ nguyên) ...
         totals_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")],
             minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)]
         )
         totals_response = client.run_realtime_report(totals_request)
-        active_users = int(totals_response.totals[0].metric_values[0].value) if totals_response.totals else 0
+        active_users_30min = int(totals_response.totals[0].metric_values[0].value) if totals_response.totals else 0
         views = int(totals_response.totals[0].metric_values[1].value) if totals_response.totals else 0
 
-        # 2. Request cho bảng các trang
         pages_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             dimensions=[Dimension(name="unifiedScreenName")],
@@ -75,17 +89,31 @@ def fetch_realtime_data():
             page_title = row.dimension_values[0].value
             page_users = int(row.metric_values[0].value)
             page_views = int(row.metric_values[1].value)
-            pages_data.append({"Page Title and Screen Class": page_title, "Active Users": page_users, "Views": page_views})
+
+            ### THAY ĐỔI: Sử dụng vòng lặp để tìm marketer từ file JSON ###
+            marketer = "" # Giá trị mặc định
+            # Lặp qua từng quy tắc trong file JSON đã tải
+            for symbol, name in marketer_map.items():
+                if symbol in page_title:
+                    marketer = name
+                    break # Dừng lại ngay khi tìm thấy marketer đầu tiên
+
+            pages_data.append({
+                "Page Title and Screen Class": page_title,
+                "Marketer": marketer,
+                "Active Users": page_users,
+                "Views": page_views
+            })
             pages_views_sum += page_views
+            
         pages_df = pd.DataFrame(pages_data).sort_values(by="Active Users", ascending=False).head(10)
 
-        # Xử lý dự phòng nếu một số liệu bằng 0
-        if active_users == 0 and not pages_df.empty and pages_df['Active Users'].sum() > 0:
-            active_users = pages_df['Active Users'].sum()
+        # ... (phần còn lại của hàm giữ nguyên) ...
+        if active_users_30min == 0 and not pages_df.empty and pages_df['Active Users'].sum() > 0:
+            active_users_30min = pages_df['Active Users'].sum()
         if views == 0 and pages_views_sum > 0:
             views = pages_views_sum
 
-        # 3. Request cho biểu đồ mỗi phút
         per_min_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             dimensions=[Dimension(name="minutesAgo")],
@@ -102,28 +130,30 @@ def fetch_realtime_data():
             {"Time": f"-{int(min_ago)} min", "Active Users": per_min_data[min_ago]} 
             for min_ago in sorted(per_min_data.keys(), key=int)
         ])
+        
+        active_users_5min_final = active_users_5min_api
+        if active_users_5min_api == 0 and not per_min_df.empty:
+            sum_from_chart = int(per_min_df.head(5)['Active Users'].sum())
+            if sum_from_chart > 0:
+                active_users_5min_final = sum_from_chart
 
-        return active_users, views, pages_df, per_min_df
+        return active_users_5min_final, active_users_30min, views, pages_df, per_min_df
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
-        return 0, 0, pd.DataFrame(), pd.DataFrame()
+        return 0, 0, 0, pd.DataFrame(), pd.DataFrame()
 
 # --- LUỒNG CHÍNH CỦA ỨNG DỤNG ---
-
-### THAY ĐỔI ### - Thêm bước kiểm tra cookie đã sẵn sàng chưa
+# (Toàn bộ phần này giữ nguyên, không thay đổi)
 if not cookies.ready():
-    # Hiển thị icon loading và dừng script tạm thời để chờ cookie
     st.spinner()
     st.stop()
 
-# Kiểm tra cookie trước để duy trì trạng thái đăng nhập
 if 'logged_in' not in st.session_state:
     if cookies.get('logged_in_status') == 'true':
         st.session_state['logged_in'] = True
     else:
         st.session_state['logged_in'] = False
 
-# Nếu người dùng chưa đăng nhập, hiển thị form đăng nhập
 if not st.session_state.get('logged_in'):
     st.title("Login")
     username = st.text_input("Username")
@@ -132,35 +162,31 @@ if not st.session_state.get('logged_in'):
     if st.button("Log In"):
         if check_credentials(username, password):
             st.session_state['logged_in'] = True
-            # Đặt cookie khi đăng nhập thành công
             cookies['logged_in_status'] = 'true'
             cookies.save()
             st.rerun()
         else:
             st.error("Incorrect username or password")
-
-# Nếu người dùng đã đăng nhập, hiển thị dashboard
 else:
     st.title("Realtime Pages Dashboard")
-
-    # Xử lý đăng xuất
     if st.sidebar.button("Log Out"):
         st.session_state['logged_in'] = False
-        # Xóa cookie khi đăng xuất
         cookies['logged_in_status'] = 'false'
         cookies.save()
         st.rerun()
 
     placeholder = st.empty()
     while True:
-        active_users, views, pages_df, per_min_df = fetch_realtime_data()
+        active_users_5min, active_users_30min, views, pages_df, per_min_df = fetch_realtime_data()
         last_update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         with placeholder.container():
             st.markdown(f"*Last updated: {last_update_time}*")
-            col1, col2 = st.columns(2)
-            col1.metric("ACTIVE USERS IN LAST 30 MINUTES", active_users)
-            col2.metric("VIEWS IN LAST 30 MINUTES", views)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("ACTIVE USERS IN LAST 5 MINUTES", active_users_5min)
+            col2.metric("ACTIVE USERS IN LAST 30 MINUTES", active_users_30min)
+            col3.metric("VIEWS IN LAST 30 MINUTES", views)
 
             if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
                 fig, ax = plt.subplots(figsize=(12, 4))
