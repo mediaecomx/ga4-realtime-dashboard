@@ -97,7 +97,7 @@ def fetch_realtime_data():
         for row in pages_response.rows:
             page_title, page_users, page_views = row.dimension_values[0].value, int(row.metric_values[0].value), int(row.metric_values[1].value)
             total_views += page_views
-            marketer = "N/A"
+            marketer = ""
             for symbol, name in page_title_map.items():
                 if symbol in page_title: marketer = name; break
             pages_data.append({"Page Title and Screen Class": page_title, "Marketer": marketer, "Active Users": page_users, "Views": page_views})
@@ -119,7 +119,7 @@ def get_marketer_from_landing_page(landing_page_url: str) -> str:
     for key_string, marketer_name in sorted_mapping_items:
         if key_string.lower() in landing_page_url_lower:
             return marketer_name
-    return "N/A"
+    return ""
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
     today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
@@ -274,7 +274,7 @@ else:
                 if not all_data_df.empty:
                     if debug_mode:
                         st.subheader("DEBUG MODE: Raw Data from Google Analytics")
-                        st.write("Check the 'Marketer' column. If it shows 'N/A' for your pages, the mapping key in your JSON file is incorrect.")
+                        st.write("Check the 'Marketer' column. If it shows '' for your pages, the mapping key in your JSON file is incorrect.")
                         st.dataframe(all_data_df)
                     else:
                         data_to_display = pd.DataFrame()
