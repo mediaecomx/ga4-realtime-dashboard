@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px  # THAY THẾ MATPLOTLIB
+import plotly.express as px
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     RunRealtimeReportRequest,
@@ -97,7 +97,7 @@ def fetch_realtime_data():
         for row in pages_response.rows:
             page_title, page_users, page_views = row.dimension_values[0].value, int(row.metric_values[0].value), int(row.metric_values[1].value)
             total_views += page_views
-            marketer = ""
+            marketer = "N/A"
             for symbol, name in page_title_map.items():
                 if symbol in page_title: marketer = name; break
             pages_data.append({"Page Title and Screen Class": page_title, "Marketer": marketer, "Active Users": page_users, "Views": page_views})
@@ -119,7 +119,7 @@ def get_marketer_from_landing_page(landing_page_url: str) -> str:
     for key_string, marketer_name in sorted_mapping_items:
         if key_string.lower() in landing_page_url_lower:
             return marketer_name
-    return ""
+    return "N/A"
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
     today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
@@ -209,10 +209,6 @@ else:
         cookies.save()
         st.rerun()
 
-    if 'selected_timezone_label' not in st.session_state:
-        st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
-    st.session_state.selected_timezone_label = st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
-    
     debug_mode = False
     if user_info['role'] == 'admin':
         debug_mode = st.sidebar.checkbox("Enable Debug Mode")
@@ -221,6 +217,12 @@ else:
 
     if page == "Realtime Dashboard":
         st.title("Realtime Pages Dashboard")
+
+        # *** THAY ĐỔI: Di chuyển Timezone Selector vào đây ***
+        if 'selected_timezone_label' not in st.session_state:
+            st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
+        st.session_state.selected_timezone_label = st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
+        
         placeholder = st.empty()
         with placeholder.container():
             active_users_5min, active_users_30min, views, pages_df, per_min_df, utc_fetch_time = fetch_realtime_data()
@@ -236,22 +238,8 @@ else:
                 col1.metric("ACTIVE USERS IN LAST 5 MINUTES", active_users_5min); col2.metric("ACTIVE USERS IN LAST 30 MINUTES", active_users_30min); col3.metric("VIEWS IN LAST 30 MINUTES", views)
                 
                 if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
-                    # *** THAY ĐỔI QUAN TRỌNG: Vẽ biểu đồ bằng Plotly ***
-                    fig = px.bar(
-                        per_min_df,
-                        x="Time",
-                        y="Active Users",
-                        template="plotly_dark",
-                        color_discrete_sequence=['#4A90E2']
-                    )
-                    fig.update_layout(
-                        xaxis_title=None,
-                        yaxis_title="Active Users",
-                        plot_bgcolor='rgba(0, 0, 0, 0)',
-                        paper_bgcolor='rgba(0, 0, 0, 0)',
-                        yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'),
-                        xaxis=dict(tickangle=-90)
-                    )
+                    fig = px.bar(per_min_df, x="Time", y="Active Users", template="plotly_dark", color_discrete_sequence=['#4A90E2'])
+                    fig.update_layout(xaxis_title=None, yaxis_title="Active Users", plot_bgcolor='rgba(0, 0, 0, 0)', paper_bgcolor='rgba(0, 0, 0, 0)', yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'), xaxis=dict(tickangle=-90))
                     st.plotly_chart(fig, use_container_width=True)
 
                 st.subheader("Page and screen in last 30 minutes")
@@ -286,7 +274,7 @@ else:
                 if not all_data_df.empty:
                     if debug_mode:
                         st.subheader("DEBUG MODE: Raw Data from Google Analytics")
-                        st.write("Check the 'Marketer' column. If it shows '' for your pages, the mapping key in your JSON file is incorrect.")
+                        st.write("Check the 'Marketer' column. If it shows 'N/A' for your pages, the mapping key in your JSON file is incorrect.")
                         st.dataframe(all_data_df)
                     else:
                         data_to_display = pd.DataFrame()
