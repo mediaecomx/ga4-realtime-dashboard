@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from streamlit_cookies_manager import EncryptedCookieManager
 import json
+import pytz
 
 # --- CẤU HÌNH ---
 PROPERTY_ID = "501726461"
@@ -20,6 +21,17 @@ try:
 except FileNotFoundError:
     st.error("Lỗi: Không tìm thấy file marketer_mapping.json. Vui lòng tải file này lên GitHub.")
     st.stop()
+
+### MỚI: Định nghĩa các múi giờ cho người dùng lựa chọn ###
+TIMEZONE_MAPPINGS = {
+    "Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh",
+    "New York (UTC-4)": "America/New_York",
+    "Chicago (UTC-5)": "America/Chicago",
+    "Denver (UTC-6)": "America/Denver",
+    "Los Angeles (UTC-7)": "America/Los_Angeles",
+    "Anchorage (UTC-8)": "America/Anchorage",
+    "Honolulu (UTC-10)": "Pacific/Honolulu"
+}
 
 
 # --- XÁC THỰC VÀ COOKIES ---
@@ -54,9 +66,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-### GIẢI PHÁP TRIỆT ĐỂ: SỬ DỤNG CACHING ###
-# Thêm decorator @st.cache_data
-# ttl=60 có nghĩa là "Time to Live" = 60 giây. Dữ liệu sẽ được lưu trong cache 60 giây.
 @st.cache_data(ttl=60)
 def fetch_realtime_data():
     try:
@@ -136,10 +145,10 @@ def fetch_realtime_data():
             if sum_from_chart > 0:
                 active_users_5min_final = sum_from_chart
 
-        # Trả về thêm thời gian để hiển thị
-        return active_users_5min_final, active_users_30min, views, pages_df, per_min_df, datetime.now()
+        ### THAY ĐỔI: Luôn trả về thời gian theo múi giờ UTC để dễ chuyển đổi ###
+        now_in_utc = datetime.now(pytz.utc)
+        return active_users_5min_final, active_users_30min, views, pages_df, per_min_df, now_in_utc
     except Exception as e:
-        # Trả về lỗi để hiển thị
         return None, None, None, None, None, str(e)
 
 
@@ -175,15 +184,34 @@ else:
         cookies.save()
         st.rerun()
 
+    ### MỚI: Thêm ô lựa chọn múi giờ ở Sidebar ###
+    # Khởi tạo giá trị mặc định trong session state nếu chưa có
+    if 'selected_timezone_label' not in st.session_state:
+        st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
+
+    # Tạo selectbox
+    st.session_state.selected_timezone_label = st.sidebar.selectbox(
+        "Select Timezone",
+        options=list(TIMEZONE_MAPPINGS.keys()),
+        key="timezone_selector"
+    )
+
     placeholder = st.empty()
     while True:
-        # Gọi hàm đã được cache. Dù 15 người gọi, chỉ 1 người thực sự chạy hàm này mỗi 60s.
-        active_users_5min, active_users_30min, views, pages_df, per_min_df, last_fetch_time = fetch_realtime_data()
+        active_users_5min, active_users_30min, views, pages_df, per_min_df, utc_fetch_time = fetch_realtime_data()
         
-        if active_users_5min is None: # Xử lý trường hợp có lỗi
-            st.error(f"Error fetching data: {last_fetch_time}")
+        if active_users_5min is None:
+            st.error(f"Error fetching data: {utc_fetch_time}")
         else:
-            last_update_time_str = last_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
+            ### THAY ĐỔI: Chuyển đổi thời gian theo lựa chọn của người dùng ###
+            # Lấy tên múi giờ chuẩn từ lựa chọn
+            selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
+            # Tạo đối tượng múi giờ
+            selected_tz = pytz.timezone(selected_tz_str)
+            # Chuyển đổi thời gian UTC lấy được sang múi giờ đã chọn
+            localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
+            # Định dạng lại để hiển thị
+            last_update_time_str = localized_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
 
             with placeholder.container():
                 st.markdown(f"*Data fetched at: {last_update_time_str}*")
@@ -215,7 +243,6 @@ else:
                 else:
                     st.write("No data available in the last 30 minutes.")
         
-        # Đồng hồ đếm ngược
         timer_placeholder = st.empty()
         for seconds in range(REFRESH_INTERVAL_SECONDS, 0, -1):
             timer_placeholder.markdown(f"**Next UI refresh in: {seconds} seconds...**")
