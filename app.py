@@ -14,30 +14,23 @@ import pytz
 PROPERTY_ID = "501726461"
 REFRESH_INTERVAL_SECONDS = 60
 
-# Tải các quy tắc mapping từ file JSON
+# Tải các quy tắc mapping
 try:
     with open('marketer_mapping.json', 'r', encoding='utf-8') as f:
         marketer_map = json.load(f)
 except FileNotFoundError:
-    st.error("Lỗi: Không tìm thấy file marketer_mapping.json. Vui lòng tải file này lên GitHub.")
+    st.error("Lỗi: Không tìm thấy file marketer_mapping.json.")
     st.stop()
 
-### MỚI: Định nghĩa các múi giờ cho người dùng lựa chọn ###
 TIMEZONE_MAPPINGS = {
-    "Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh",
-    "New York (UTC-4)": "America/New_York",
-    "Chicago (UTC-5)": "America/Chicago",
-    "Denver (UTC-6)": "America/Denver",
-    "Los Angeles (UTC-7)": "America/Los_Angeles",
-    "Anchorage (UTC-8)": "America/Anchorage",
+    "Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh", "New York (UTC-4)": "America/New_York",
+    "Chicago (UTC-5)": "America/Chicago", "Denver (UTC-6)": "America/Denver",
+    "Los Angeles (UTC-7)": "America/Los_Angeles", "Anchorage (UTC-8)": "America/Anchorage",
     "Honolulu (UTC-10)": "Pacific/Honolulu"
 }
 
-
 # --- XÁC THỰC VÀ COOKIES ---
-cookies = EncryptedCookieManager(
-    password=st.secrets["cookie"]["encrypt_key"],
-)
+cookies = EncryptedCookieManager(password=st.secrets["cookie"]["encrypt_key"])
 
 def check_credentials(username, password):
     correct_username = st.secrets["credentials"]["username"]
@@ -58,76 +51,72 @@ except Exception as e:
 # --- GIAO DIỆN ---
 st.markdown("""
     <style>
-    .stApp { background-color: black; color: white; }
-    .stMetric { color: white; }
-    .stDataFrame { color: white; }
-    .stPlotlyChart { background-color: transparent; }
+    .stApp { background-color: black; color: white; } .stMetric { color: white; }
+    .stDataFrame { color: white; } .stPlotlyChart { background-color: transparent; }
     </style>
 """, unsafe_allow_html=True)
-
 
 @st.cache_data(ttl=60)
 def fetch_realtime_data():
     try:
-        # 1. Lệnh gọi API riêng cho 5 phút
-        five_min_request = RunRealtimeReportRequest(
+        ### KIẾN TRÚC 3 LỆNH GỌI API MỚI ###
+
+        # 1. LỆNH GỌI A: Lấy chỉ số KPI chính xác (5 phút và 30 phút)
+        kpi_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             metrics=[Metric(name="activeUsers")],
-            minute_ranges=[MinuteRange(start_minutes_ago=4, end_minutes_ago=0)]
+            minute_ranges=[
+                MinuteRange(start_minutes_ago=29, end_minutes_ago=0), # Khoảng 30 phút
+                MinuteRange(start_minutes_ago=4, end_minutes_ago=0)   # Khoảng 5 phút
+            ]
         )
-        five_min_response = client.run_realtime_report(five_min_request)
-        active_users_5min_api = int(five_min_response.totals[0].metric_values[0].value) if five_min_response.totals else 0
-
-        # 2. Request cho số liệu tổng 30 phút
-        totals_request = RunRealtimeReportRequest(
-            property=f"properties/{PROPERTY_ID}",
-            metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")],
-            minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)]
-        )
-        totals_response = client.run_realtime_report(totals_request)
-        active_users_30min = int(totals_response.totals[0].metric_values[0].value) if totals_response.totals else 0
-        views = int(totals_response.totals[0].metric_values[1].value) if totals_response.totals else 0
-
-        # 3. Request cho bảng các trang
+        
+        # 2. LỆNH GỌI B: Lấy dữ liệu cho bảng trang
         pages_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             dimensions=[Dimension(name="unifiedScreenName")],
             metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")],
             minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)]
         )
-        pages_response = client.run_realtime_report(pages_request)
-        pages_data = []
-        pages_views_sum = 0
-        for row in pages_response.rows:
-            page_title = row.dimension_values[0].value
-            page_users = int(row.metric_values[0].value)
-            page_views = int(row.metric_values[1].value)
-            marketer = ""
-            for symbol, name in marketer_map.items():
-                if symbol in page_title:
-                    marketer = name
-                    break
-            pages_data.append({
-                "Page Title and Screen Class": page_title,
-                "Marketer": marketer, "Active Users": page_users, "Views": page_views
-            })
-            pages_views_sum += page_views
-        pages_df = pd.DataFrame(pages_data).sort_values(by="Active Users", ascending=False).head(10)
-
-        # Xử lý dự phòng
-        if active_users_30min == 0 and not pages_df.empty and pages_df['Active Users'].sum() > 0:
-            active_users_30min = pages_df['Active Users'].sum()
-        if views == 0 and pages_views_sum > 0:
-            views = pages_views_sum
-
-        # 4. Request cho biểu đồ mỗi phút
+        
+        # 3. LỆNH GỌI C: Lấy dữ liệu cho biểu đồ
         per_min_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             dimensions=[Dimension(name="minutesAgo")],
             metrics=[Metric(name="activeUsers")],
             minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)]
         )
+
+        # Chạy đồng thời các request
+        kpi_response = client.run_realtime_report(kpi_request)
+        pages_response = client.run_realtime_report(pages_request)
         per_min_response = client.run_realtime_report(per_min_request)
+
+        # Xử lý response A: Lấy chỉ số KPI
+        # Hàng đầu tiên (index 0) là cho khoảng 30 phút, hàng thứ hai (index 1) là cho 5 phút
+        active_users_30min = int(kpi_response.rows[0].metric_values[0].value) if len(kpi_response.rows) > 0 else 0
+        active_users_5min = int(kpi_response.rows[1].metric_values[0].value) if len(kpi_response.rows) > 1 else 0
+
+        # Xử lý response B: Lấy dữ liệu bảng và tính tổng Views
+        pages_data = []
+        total_views = 0
+        for row in pages_response.rows:
+            page_title = row.dimension_values[0].value
+            page_users = int(row.metric_values[0].value)
+            page_views = int(row.metric_values[1].value)
+            total_views += page_views # Cộng dồn Views từ mỗi hàng
+            marketer = ""
+            for symbol, name in marketer_map.items():
+                if symbol in page_title:
+                    marketer = name
+                    break
+            pages_data.append({
+                "Page Title and Screen Class": page_title, "Marketer": marketer,
+                "Active Users": page_users, "Views": page_views
+            })
+        pages_df = pd.DataFrame(pages_data).sort_values(by="Active Users", ascending=False).head(10)
+
+        # Xử lý response C: Lấy dữ liệu biểu đồ
         per_min_data = {str(i): 0 for i in range(30)}
         for row in per_min_response.rows:
             min_ago = row.dimension_values[0].value
@@ -138,16 +127,8 @@ def fetch_realtime_data():
             for min_ago in sorted(per_min_data.keys(), key=int)
         ])
         
-        # Logic kết hợp
-        active_users_5min_final = active_users_5min_api
-        if active_users_5min_api == 0 and not per_min_df.empty:
-            sum_from_chart = int(per_min_df.head(5)['Active Users'].sum())
-            if sum_from_chart > 0:
-                active_users_5min_final = sum_from_chart
-
-        ### THAY ĐỔI: Luôn trả về thời gian theo múi giờ UTC để dễ chuyển đổi ###
         now_in_utc = datetime.now(pytz.utc)
-        return active_users_5min_final, active_users_30min, views, pages_df, per_min_df, now_in_utc
+        return active_users_5min, active_users_30min, total_views, pages_df, per_min_df, now_in_utc
     except Exception as e:
         return None, None, None, None, None, str(e)
 
@@ -184,16 +165,11 @@ else:
         cookies.save()
         st.rerun()
 
-    ### MỚI: Thêm ô lựa chọn múi giờ ở Sidebar ###
-    # Khởi tạo giá trị mặc định trong session state nếu chưa có
     if 'selected_timezone_label' not in st.session_state:
         st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
 
-    # Tạo selectbox
     st.session_state.selected_timezone_label = st.sidebar.selectbox(
-        "Select Timezone",
-        options=list(TIMEZONE_MAPPINGS.keys()),
-        key="timezone_selector"
+        "Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector"
     )
 
     placeholder = st.empty()
@@ -203,14 +179,9 @@ else:
         if active_users_5min is None:
             st.error(f"Error fetching data: {utc_fetch_time}")
         else:
-            ### THAY ĐỔI: Chuyển đổi thời gian theo lựa chọn của người dùng ###
-            # Lấy tên múi giờ chuẩn từ lựa chọn
             selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
-            # Tạo đối tượng múi giờ
             selected_tz = pytz.timezone(selected_tz_str)
-            # Chuyển đổi thời gian UTC lấy được sang múi giờ đã chọn
             localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
-            # Định dạng lại để hiển thị
             last_update_time_str = localized_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
 
             with placeholder.container():
