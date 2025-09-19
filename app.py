@@ -59,15 +59,13 @@ st.markdown("""
 @st.cache_data(ttl=60)
 def fetch_realtime_data():
     try:
-        ### KIẾN TRÚC 3 LỆNH GỌI API MỚI ###
-
         # 1. LỆNH GỌI A: Lấy chỉ số KPI chính xác (5 phút và 30 phút)
         kpi_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             metrics=[Metric(name="activeUsers")],
             minute_ranges=[
-                MinuteRange(start_minutes_ago=29, end_minutes_ago=0), # Khoảng 30 phút
-                MinuteRange(start_minutes_ago=4, end_minutes_ago=0)   # Khoảng 5 phút
+                MinuteRange(start_minutes_ago=29, end_minutes_ago=0),
+                MinuteRange(start_minutes_ago=4, end_minutes_ago=0)
             ]
         )
         
@@ -87,13 +85,12 @@ def fetch_realtime_data():
             minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)]
         )
 
-        # Chạy đồng thời các request
+        # Chạy các request
         kpi_response = client.run_realtime_report(kpi_request)
         pages_response = client.run_realtime_report(pages_request)
         per_min_response = client.run_realtime_report(per_min_request)
 
         # Xử lý response A: Lấy chỉ số KPI
-        # Hàng đầu tiên (index 0) là cho khoảng 30 phút, hàng thứ hai (index 1) là cho 5 phút
         active_users_30min = int(kpi_response.rows[0].metric_values[0].value) if len(kpi_response.rows) > 0 else 0
         active_users_5min = int(kpi_response.rows[1].metric_values[0].value) if len(kpi_response.rows) > 1 else 0
 
@@ -104,7 +101,7 @@ def fetch_realtime_data():
             page_title = row.dimension_values[0].value
             page_users = int(row.metric_values[0].value)
             page_views = int(row.metric_values[1].value)
-            total_views += page_views # Cộng dồn Views từ mỗi hàng
+            total_views += page_views
             marketer = ""
             for symbol, name in marketer_map.items():
                 if symbol in page_title:
@@ -177,16 +174,23 @@ else:
         active_users_5min, active_users_30min, views, pages_df, per_min_df, utc_fetch_time = fetch_realtime_data()
         
         if active_users_5min is None:
-            st.error(f"Error fetching data: {utc_fetch_time}")
-        else:
-            selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
-            selected_tz = pytz.timezone(selected_tz_str)
-            localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
-            last_update_time_str = localized_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
-
+            # Nếu có lỗi, chỉ hiển thị lỗi trong placeholder chính
             with placeholder.container():
+                st.error(f"Error fetching data: {utc_fetch_time}")
+        else:
+            # Nếu không có lỗi, vẽ toàn bộ dashboard
+            with placeholder.container():
+                selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
+                selected_tz = pytz.timezone(selected_tz_str)
+                localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
+                last_update_time_str = localized_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
+
                 st.markdown(f"*Data fetched at: {last_update_time_str}*")
                 
+                ### THAY ĐỔI 1: Tạo một "vùng chứa" trống cho bộ đếm ngược ###
+                timer_placeholder = st.empty()
+
+                # Hiển thị các chỉ số, biểu đồ, bảng như cũ
                 col1, col2, col3 = st.columns(3)
                 col1.metric("ACTIVE USERS IN LAST 5 MINUTES", active_users_5min)
                 col2.metric("ACTIVE USERS IN LAST 30 MINUTES", active_users_30min)
@@ -214,9 +218,14 @@ else:
                 else:
                     st.write("No data available in the last 30 minutes.")
         
-        timer_placeholder = st.empty()
+        ### THAY ĐỔI 2: Chạy vòng lặp đếm ngược và cập nhật "vùng chứa" đã tạo ###
+        # Vòng lặp này bây giờ nằm ngoài placeholder.container()
         for seconds in range(REFRESH_INTERVAL_SECONDS, 0, -1):
-            timer_placeholder.markdown(f"**Next UI refresh in: {seconds} seconds...**")
+            # Cập nhật nội dung của timer_placeholder với màu xanh
+            timer_placeholder.markdown(
+                f'<p style="color:green;"><b>Next UI refresh in: {seconds} seconds...</b></p>',
+                unsafe_allow_html=True
+            )
             time.sleep(1)
             
         st.rerun()
