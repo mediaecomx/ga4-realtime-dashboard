@@ -7,14 +7,13 @@ from google.oauth2 import service_account
 import time
 from datetime import datetime
 from streamlit_cookies_manager import EncryptedCookieManager
-import json ### MỚI: Thêm thư viện json
+import json
 
 # --- CẤU HÌNH ---
 PROPERTY_ID = "501726461"
 REFRESH_INTERVAL_SECONDS = 60
 
-### MỚI: Tải các quy tắc mapping từ file JSON khi ứng dụng khởi động ###
-# encoding='utf-8' rất quan trọng để đọc được các icon
+# Tải các quy tắc mapping từ file JSON
 try:
     with open('marketer_mapping.json', 'r', encoding='utf-8') as f:
         marketer_map = json.load(f)
@@ -54,7 +53,11 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- HÀM LẤY DỮ LIỆU ---
+
+### GIẢI PHÁP TRIỆT ĐỂ: SỬ DỤNG CACHING ###
+# Thêm decorator @st.cache_data
+# ttl=60 có nghĩa là "Time to Live" = 60 giây. Dữ liệu sẽ được lưu trong cache 60 giây.
+@st.cache_data(ttl=60)
 def fetch_realtime_data():
     try:
         # 1. Lệnh gọi API riêng cho 5 phút
@@ -66,7 +69,7 @@ def fetch_realtime_data():
         five_min_response = client.run_realtime_report(five_min_request)
         active_users_5min_api = int(five_min_response.totals[0].metric_values[0].value) if five_min_response.totals else 0
 
-        # ... (các request khác giữ nguyên) ...
+        # 2. Request cho số liệu tổng 30 phút
         totals_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")],
@@ -76,6 +79,7 @@ def fetch_realtime_data():
         active_users_30min = int(totals_response.totals[0].metric_values[0].value) if totals_response.totals else 0
         views = int(totals_response.totals[0].metric_values[1].value) if totals_response.totals else 0
 
+        # 3. Request cho bảng các trang
         pages_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             dimensions=[Dimension(name="unifiedScreenName")],
@@ -89,31 +93,25 @@ def fetch_realtime_data():
             page_title = row.dimension_values[0].value
             page_users = int(row.metric_values[0].value)
             page_views = int(row.metric_values[1].value)
-
-            ### THAY ĐỔI: Sử dụng vòng lặp để tìm marketer từ file JSON ###
-            marketer = "" # Giá trị mặc định
-            # Lặp qua từng quy tắc trong file JSON đã tải
+            marketer = ""
             for symbol, name in marketer_map.items():
                 if symbol in page_title:
                     marketer = name
-                    break # Dừng lại ngay khi tìm thấy marketer đầu tiên
-
+                    break
             pages_data.append({
                 "Page Title and Screen Class": page_title,
-                "Marketer": marketer,
-                "Active Users": page_users,
-                "Views": page_views
+                "Marketer": marketer, "Active Users": page_users, "Views": page_views
             })
             pages_views_sum += page_views
-            
         pages_df = pd.DataFrame(pages_data).sort_values(by="Active Users", ascending=False).head(10)
 
-        # ... (phần còn lại của hàm giữ nguyên) ...
+        # Xử lý dự phòng
         if active_users_30min == 0 and not pages_df.empty and pages_df['Active Users'].sum() > 0:
             active_users_30min = pages_df['Active Users'].sum()
         if views == 0 and pages_views_sum > 0:
             views = pages_views_sum
 
+        # 4. Request cho biểu đồ mỗi phút
         per_min_request = RunRealtimeReportRequest(
             property=f"properties/{PROPERTY_ID}",
             dimensions=[Dimension(name="minutesAgo")],
@@ -131,19 +129,21 @@ def fetch_realtime_data():
             for min_ago in sorted(per_min_data.keys(), key=int)
         ])
         
+        # Logic kết hợp
         active_users_5min_final = active_users_5min_api
         if active_users_5min_api == 0 and not per_min_df.empty:
             sum_from_chart = int(per_min_df.head(5)['Active Users'].sum())
             if sum_from_chart > 0:
                 active_users_5min_final = sum_from_chart
 
-        return active_users_5min_final, active_users_30min, views, pages_df, per_min_df
+        # Trả về thêm thời gian để hiển thị
+        return active_users_5min_final, active_users_30min, views, pages_df, per_min_df, datetime.now()
     except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
-        return 0, 0, 0, pd.DataFrame(), pd.DataFrame()
+        # Trả về lỗi để hiển thị
+        return None, None, None, None, None, str(e)
+
 
 # --- LUỒNG CHÍNH CỦA ỨNG DỤNG ---
-# (Toàn bộ phần này giữ nguyên, không thay đổi)
 if not cookies.ready():
     st.spinner()
     st.stop()
@@ -177,43 +177,48 @@ else:
 
     placeholder = st.empty()
     while True:
-        active_users_5min, active_users_30min, views, pages_df, per_min_df = fetch_realtime_data()
-        last_update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Gọi hàm đã được cache. Dù 15 người gọi, chỉ 1 người thực sự chạy hàm này mỗi 60s.
+        active_users_5min, active_users_30min, views, pages_df, per_min_df, last_fetch_time = fetch_realtime_data()
+        
+        if active_users_5min is None: # Xử lý trường hợp có lỗi
+            st.error(f"Error fetching data: {last_fetch_time}")
+        else:
+            last_update_time_str = last_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
 
-        with placeholder.container():
-            st.markdown(f"*Last updated: {last_update_time}*")
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("ACTIVE USERS IN LAST 5 MINUTES", active_users_5min)
-            col2.metric("ACTIVE USERS IN LAST 30 MINUTES", active_users_30min)
-            col3.metric("VIEWS IN LAST 30 MINUTES", views)
+            with placeholder.container():
+                st.markdown(f"*Data fetched at: {last_update_time_str}*")
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("ACTIVE USERS IN LAST 5 MINUTES", active_users_5min)
+                col2.metric("ACTIVE USERS IN LAST 30 MINUTES", active_users_30min)
+                col3.metric("VIEWS IN LAST 30 MINUTES", views)
 
-            if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
-                fig, ax = plt.subplots(figsize=(12, 4))
-                fig.patch.set_facecolor('black')
-                ax.set_facecolor('black')
-                ax.bar(per_min_df["Time"], per_min_df["Active Users"], color='#4A90E2')
-                ax.tick_params(axis='x', colors='white')
-                ax.tick_params(axis='y', colors='white')
-                ax.spines['bottom'].set_color('white')
-                ax.spines['left'].set_color('white')
-                ax.spines['top'].set_color('black')
-                ax.spines['right'].set_color('black')
-                ax.yaxis.label.set_color('white')
-                ax.xaxis.label.set_color('white')
-                plt.xticks(rotation=90)
-                st.pyplot(fig)
+                if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
+                    fig, ax = plt.subplots(figsize=(12, 4))
+                    fig.patch.set_facecolor('black')
+                    ax.set_facecolor('black')
+                    ax.bar(per_min_df["Time"], per_min_df["Active Users"], color='#4A90E2')
+                    ax.tick_params(axis='x', colors='white')
+                    ax.tick_params(axis='y', colors='white')
+                    ax.spines['bottom'].set_color('white')
+                    ax.spines['left'].set_color('white')
+                    ax.spines['top'].set_color('black')
+                    ax.spines['right'].set_color('black')
+                    ax.yaxis.label.set_color('white')
+                    ax.xaxis.label.set_color('white')
+                    plt.xticks(rotation=90)
+                    st.pyplot(fig)
 
-            st.subheader("Page and screen in last 30 minutes")
-            if not pages_df.empty:
-                st.table(pages_df.reset_index(drop=True))
-            else:
-                st.write("No data available in the last 30 minutes.")
-
+                st.subheader("Page and screen in last 30 minutes")
+                if not pages_df.empty:
+                    st.table(pages_df.reset_index(drop=True))
+                else:
+                    st.write("No data available in the last 30 minutes.")
+        
+        # Đồng hồ đếm ngược
         timer_placeholder = st.empty()
         for seconds in range(REFRESH_INTERVAL_SECONDS, 0, -1):
-            timer_placeholder.markdown(f"**Next refresh in: {seconds} seconds...**")
+            timer_placeholder.markdown(f"**Next UI refresh in: {seconds} seconds...**")
             time.sleep(1)
             
-        placeholder.empty()
-        timer_placeholder.empty()
+        st.rerun()
