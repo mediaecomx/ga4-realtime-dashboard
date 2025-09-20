@@ -15,7 +15,6 @@ import pytz
 import numpy as np
 import re
 import requests
-import base64
 
 # --- CẤU HÌNH CHUNG ---
 PROPERTY_ID = "501726461"
@@ -260,8 +259,11 @@ else:
         with col1:
             st.write("Current Avatar:")
             # *** SỬA LỖI: Luôn dùng link, không đọc file cục bộ ***
-            current_avatar_url = st.session_state['user_info'].get('avatar_url', default_avatar_url)
-            st.image(current_avatar_url, width=150)
+            current_avatar_url = st.session_state['user_info'].get('avatar_url') or default_avatar_url
+            if current_avatar_url:
+                st.image(current_avatar_url, width=150)
+            else:
+                st.warning("No default avatar URL configured in secrets.toml")
 
         with col2:
             st.write("Upload a new image (JPG, PNG):")
@@ -270,10 +272,12 @@ else:
             if uploaded_file is not None:
                 with st.spinner("Uploading to ImageBB..."):
                     try:
-                        # *** SỬA LỖI: Khôi phục lại logic upload ảnh chính xác ***
-                        url = f"https://api.imgbb.com/1/upload?key={imagebb_api_key}"
-                        payload = {"image": base64.b64encode(uploaded_file.getvalue()).decode('utf-8')}
-                        response = requests.post(url, data=payload)
+                        # *** SỬA LỖI: Gửi request đến ImageBB theo đúng định dạng `files` ***
+                        url = "https://api.imgbb.com/1/upload"
+                        params = {"key": imagebb_api_key}
+                        files = {"image": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                        
+                        response = requests.post(url, params=params, files=files)
                         response.raise_for_status()
                         
                         imgbb_data = response.json()
