@@ -55,6 +55,7 @@ try:
     ga_client = BetaAnalyticsDataClient(credentials=ga_credentials)
     shopify_creds = st.secrets["shopify_credentials"]
     imagebb_api_key = st.secrets["imagebb_credentials"]["api_key"]
+    default_avatar_url = st.secrets["default_images"]["avatar_url"]
 except Exception as e:
     st.error(f"Lỗi khi khởi tạo Client hoặc đọc secrets: {e}"); st.stop()
 
@@ -80,14 +81,6 @@ def highlight_purchases(val):
     if isinstance(val, (int, float)) and val > 0:
         return 'background-color: #023020; color: #23d123; font-weight: bold;'
     return ''
-
-@st.cache_data(show_spinner=False)
-def get_base64_of_local_image(file_path):
-    try:
-        with open(file_path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    except FileNotFoundError:
-        return None
 
 # --- CÁC HÀM LẤY DỮ LIỆU ---
 @st.cache_data(ttl=60)
@@ -231,13 +224,7 @@ if not st.session_state['user_info']:
 else:
     effective_user_info = dict(st.session_state['user_info'])
     
-    avatar_url = effective_user_info.get("avatar_url", "")
-    if not avatar_url:
-        local_avatar_base64 = get_base64_of_local_image("avatar.jpg")
-        if local_avatar_base64:
-            avatar_url = f"data:image/jpeg;base64,{local_avatar_base64}"
-        else:
-            avatar_url = ""
+    avatar_url = effective_user_info.get("avatar_url") or default_avatar_url
     welcome_card_html = f"""<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; margin-bottom: 20px;"><img src="{avatar_url}" style="width: 100px; height: 100px; border-radius: 50%; object-fit: cover; border: 2px solid #3c4043;"><p style="margin-top: 10px; margin-bottom: 0; font-size: 1em; color: #d0d0d0;">Welcome,</p><p style="margin: 0; font-size: 1.25em; font-weight: bold; color: #1ED760;">{effective_user_info['username']}</p></div>"""
     st.sidebar.markdown(welcome_card_html, unsafe_allow_html=True)
     
@@ -272,11 +259,9 @@ else:
         col1, col2 = st.columns([1, 2])
         with col1:
             st.write("Current Avatar:")
-            current_avatar_url = st.session_state['user_info'].get('avatar_url', "")
-            if current_avatar_url:
-                st.image(current_avatar_url, width=150)
-            else:
-                st.image("avatar.jpg", width=150)
+            # *** SỬA LỖI: Luôn dùng link, không đọc file cục bộ ***
+            current_avatar_url = st.session_state['user_info'].get('avatar_url', default_avatar_url)
+            st.image(current_avatar_url, width=150)
 
         with col2:
             st.write("Upload a new image (JPG, PNG):")
@@ -285,12 +270,10 @@ else:
             if uploaded_file is not None:
                 with st.spinner("Uploading to ImageBB..."):
                     try:
-                        # *** THAY ĐỔI: Sửa lại cách gửi request đến ImageBB ***
-                        url = "https://api.imgbb.com/1/upload"
-                        payload = {"key": imagebb_api_key}
-                        files = {"image": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                        
-                        response = requests.post(url, params=payload, files=files)
+                        # *** SỬA LỖI: Khôi phục lại logic upload ảnh chính xác ***
+                        url = f"https://api.imgbb.com/1/upload?key={imagebb_api_key}"
+                        payload = {"image": base64.b64encode(uploaded_file.getvalue()).decode('utf-8')}
+                        response = requests.post(url, data=payload)
                         response.raise_for_status()
                         
                         imgbb_data = response.json()
@@ -306,7 +289,7 @@ else:
                         st.error(f"Failed to upload image. Please try again. Error: {e}")
 
     elif page == "Realtime Dashboard":
-        # ... (Phần này giữ nguyên)
+        # ... (Phần logic còn lại giữ nguyên)
         st.title("Realtime Pages Dashboard")
         if 'selected_timezone_label' not in st.session_state: st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
         st.session_state.selected_timezone_label = st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
