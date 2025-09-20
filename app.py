@@ -138,7 +138,7 @@ def fetch_realtime_data():
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
             merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
-            final_pages_df = merged_df.sort_values(by="Active Users", ascending=False).head(10)
+            final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)
             final_pages_df = final_pages_df[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "CR"]]
         else:
             final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
@@ -152,7 +152,6 @@ def fetch_realtime_data():
 def get_marketer_from_page_title(title: str) -> str:
     for symbol, name in page_title_map.items():
         if symbol in title: return name
-    # *** THAY ĐỔI: Thay "N/A" thành "" ***
     return ""
 
 def get_marketer_from_landing_page(landing_page_url: str) -> str:
@@ -161,7 +160,6 @@ def get_marketer_from_landing_page(landing_page_url: str) -> str:
     for key_string, marketer_name in sorted_mapping_items:
         if key_string.lower() in landing_page_url_lower:
             return marketer_name
-    # *** THAY ĐỔI: Thay "N/A" thành "" ***
     return ""
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
@@ -222,29 +220,33 @@ if not st.session_state['user_info']:
         else:
             st.error("Incorrect username or password")
 else:
-    user_info = dict(st.session_state['user_info'])
-    st.sidebar.success(f"Welcome, **{user_info['username']}**!")
+    effective_user_info = dict(st.session_state['user_info'])
+    st.sidebar.success(f"Welcome, **{effective_user_info['username']}**!")
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Choose a report:", ("Realtime Dashboard", "Landing Page Report"))
     if st.sidebar.button("Log Out"):
         st.session_state['user_info'] = None; cookies['username'] = None; cookies.save(); st.rerun()
 
-    if user_info['role'] == 'admin':
+    impersonating = False
+    if st.session_state['user_info']['role'] == 'admin':
         st.sidebar.divider()
         all_users = st.secrets.get("users", {})
-        employee_list = {v['username']: v['marketer_id'] for k, v in all_users.items() if v['role'] == 'employee'}
-        impersonation_options = ["None (View as Admin)"] + list(employee_list.keys())
-        selected_user = st.sidebar.selectbox("Impersonate User", options=impersonation_options)
+        # Lấy thông tin đầy đủ của nhân viên để truy cập các thuộc tính khác
+        employee_details = {v['username']: v for k, v in all_users.items() if v['role'] == 'employee'}
+        impersonation_options = ["None (View as Admin)"] + list(employee_details.keys())
+        selected_user_name = st.sidebar.selectbox("Impersonate User", options=impersonation_options)
 
-        if selected_user != "None (View as Admin)":
-            user_info['marketer_id'] = employee_list[selected_user]
-            user_info['role'] = 'employee'
-            st.sidebar.info(f"Viewing as **{selected_user}** (Marketer ID: {user_info['marketer_id']})")
+        if selected_user_name != "None (View as Admin)":
+            impersonating = True
+            # Lấy toàn bộ thông tin của nhân viên đang được giả lập
+            impersonated_user_details = employee_details[selected_user_name]
+            effective_user_info = impersonated_user_details
+            st.sidebar.info(f"Viewing as **{selected_user_name}**")
     
     debug_mode = False
-    if st.session_state['user_info']['role'] == 'admin' and (locals().get('selected_user') == "None (View as Admin)" or 'selected_user' not in locals()):
+    if st.session_state['user_info']['role'] == 'admin' and not impersonating:
         debug_mode = st.sidebar.checkbox("Enable Debug Mode")
-        if debug_mode: st.sidebar.warning("Debug mode is ON. Additional info is shown.")
+        if debug_mode: st.sidebar.warning("Debug mode is ON.")
     
     if page == "Realtime Dashboard":
         st.title("Realtime Pages Dashboard")
@@ -258,10 +260,17 @@ else:
             if fetch_result[0] is None: 
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df = fetch_result
-                if user_info['role'] == 'employee':
-                    marketer_id = user_info['marketer_id']
-                    pages_df = pages_df[pages_df['Marketer'] == marketer_id]
+                active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df = fetch_result
+                
+                pages_to_display = pages_df_full.head(10)
+                # *** THAY ĐỔI: Logic phân quyền mới, dựa trên effective_user_info ***
+                can_view_all = (
+                    effective_user_info['role'] == 'admin' or 
+                    effective_user_info.get('can_view_all_realtime_data', False)
+                )
+                if not can_view_all:
+                    marketer_id = effective_user_info['marketer_id']
+                    pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
 
                 selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
                 selected_tz = pytz.timezone(selected_tz_str)
@@ -290,21 +299,15 @@ else:
                     st.plotly_chart(fig, use_container_width=True)
                 
                 st.subheader("Page and screen in last 30 minutes")
-                if not pages_df.empty:
-                    st.dataframe(pages_df.style.format({'CR': "{:.2f}%"}).applymap(highlight_purchases, subset=['Purchases', 'CR']), use_container_width=True)
+                if not pages_to_display.empty:
+                    st.dataframe(pages_to_display.style.format({'CR': "{:.2f}%"}).applymap(highlight_purchases, subset=['Purchases', 'CR']), use_container_width=True)
                 else: 
-                    st.write("No data available in the last 30 minutes.")
+                    st.write("No data available for your user.")
                 if debug_mode:
-                    st.divider()
-                    st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
-                    with st.expander("1. Raw Data from APIs"):
-                        st.write("**Google Analytics (Traffic):**"); st.code(ga_raw_df.to_dict('records'))
-                        st.write("**Shopify (Purchases):**"); st.code(shopify_raw_df.to_dict('records'))
-                    with st.expander("2. Processed Data (before merge)"):
-                        st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df)
-                        st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_processed_df.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index())
-                    with st.expander("3. Merged Data (full result before top 10)"):
-                        st.dataframe(merged_final_df)
+                    st.divider(); st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
+                    with st.expander("1. Raw Data from APIs"): st.write("**Google Analytics (Traffic):**"); st.code(ga_raw_df.to_dict('records')); st.write("**Shopify (Purchases):**"); st.code(shopify_raw_df.to_dict('records'))
+                    with st.expander("2. Processed Data (before merge)"): st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df); st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_processed_df.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index())
+                    with st.expander("3. Merged Data (full result before final top 10)"): st.dataframe(merged_final_df)
         for seconds in range(REFRESH_INTERVAL_SECONDS, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True)
             time.sleep(1)
@@ -329,10 +332,10 @@ else:
                 all_data_df, merged_raw_df = fetch_landing_page_data(start_date_str, end_date_str)
                 if not all_data_df.empty:
                     data_to_display = pd.DataFrame()
-                    if user_info['role'] == 'admin':
+                    if effective_user_info['role'] == 'admin':
                         data_to_display = all_data_df.head(20)
                     else:
-                        marketer_id = user_info['marketer_id']
+                        marketer_id = effective_user_info['marketer_id']
                         employee_df = all_data_df[all_data_df['Marketer'] == marketer_id]
                         data_to_display = employee_df.sort_values(by="Sessions", ascending=False).head(20)
                     if not data_to_display.empty:
