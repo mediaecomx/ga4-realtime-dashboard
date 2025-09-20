@@ -92,7 +92,7 @@ def fetch_shopify_realtime_purchases_rest():
     try:
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
         
-        url = f"https://{shopify_creds['store_url']}/admin/api/{shopify_creds['api_version']}/orders.json"
+        url = f"https://{shopify_creds['store_url']}/admipi/{shopify_creds['api_version']}/orders.json"
         headers = {"X-Shopify-Access-Token": shopify_creds['access_token']}
         params = {
             "created_at_min": thirty_minutes_ago,
@@ -174,7 +174,7 @@ def get_marketer_from_landing_page(title: str) -> str:
         if key.lower() in title.lower(): return name
     for symbol, name in page_title_map.items():
         if symbol in title: return name
-    return "N/A"
+    return ""
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
     # ... (Hàm này giữ nguyên)
@@ -324,7 +324,7 @@ else:
                 all_data_df = fetch_landing_page_data(start_date_str, end_date_str)
                 if not all_data_df.empty:
                     if debug_mode:
-                        st.subheader("DEBUG MODE: Raw Data from Google Analytics"); st.write("Check the 'Marketer' column. If it shows 'N/A' for your pages, the mapping key in your JSON file is incorrect."); st.dataframe(all_data_df)
+                        st.subheader("DEBUG MODE: Raw Data from Google Analytics"); st.write("Check the 'Marketer' column. If it shows '' for your pages, the mapping key in your JSON file is incorrect."); st.dataframe(all_data_df)
                     else:
                         data_to_display = pd.DataFrame()
                         if user_info['role'] == 'admin':
