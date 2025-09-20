@@ -14,7 +14,7 @@ import json
 import pytz
 import numpy as np
 import re
-import requests # Thêm thư viện requests để gọi REST API
+import requests
 
 # --- CẤU HÌNH CHUNG ---
 PROPERTY_ID = "501726461"
@@ -86,32 +86,16 @@ def highlight_purchases(val):
 
 @st.cache_data(ttl=60)
 def fetch_shopify_realtime_purchases_rest():
-    """
-    Hàm được khôi phục từ script gốc của bạn, đã được xác nhận là lấy đúng dữ liệu.
-    """
     try:
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
-        
         url = f"https://{shopify_creds['store_url']}/admin/api/{shopify_creds['api_version']}/orders.json"
         headers = {"X-Shopify-Access-Token": shopify_creds['access_token']}
-        params = {
-            "created_at_min": thirty_minutes_ago,
-            "status": "any",
-            "fields": "line_items"
-        }
-        
+        params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "line_items"}
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         orders = response.json().get('orders', [])
         
-        purchase_data = []
-        for order in orders:
-            for item in order.get('line_items', []):
-                purchase_data.append({
-                    'Product Title': item['title'],
-                    'Purchases': item['quantity']
-                })
-
+        purchase_data = [{'Product Title': item['title'], 'Purchases': item['quantity']} for order in orders for item in order.get('line_items', [])]
         if not purchase_data: return pd.DataFrame(columns=["Product Title", "Purchases"]), 0
         
         purchases_df = pd.DataFrame(purchase_data)
@@ -140,7 +124,6 @@ def fetch_realtime_data():
         for row in per_min_response.rows: per_min_data[row.dimension_values[0].value] = int(row.metric_values[0].value)
         per_min_df = pd.DataFrame([{"Time": f"-{int(k)} min", "Active Users": v} for k, v in sorted(per_min_data.items(), key=lambda item: int(item[0]))])
         
-        # *** THAY ĐỔI: Gọi hàm REST API chính xác ***
         shopify_purchases_df, purchase_count_30min = fetch_shopify_realtime_purchases_rest()
 
         if not ga_pages_df.empty:
@@ -169,15 +152,15 @@ def fetch_realtime_data():
 
 
 def get_marketer_from_landing_page(title: str) -> str:
-    # ... (Hàm này giữ nguyên)
+    # Logic cho landing page (dựa vào chuỗi sku)
     for key, name in landing_page_map.items():
         if key.lower() in title.lower(): return name
+    # Logic cho page title (dựa vào biểu tượng)
     for symbol, name in page_title_map.items():
         if symbol in title: return name
     return "N/A"
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
-    # ... (Hàm này giữ nguyên)
     today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
     if selection == "Today": start_date = today - timedelta(days=1); end_date = today
     elif selection == "Yesterday": start_date = end_date = today - timedelta(days=1)
@@ -191,7 +174,6 @@ def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
 
 @st.cache_data
 def fetch_landing_page_data(start_date: str, end_date: str):
-    # ... (Hàm này giữ nguyên)
     try:
         product_page_filter = FilterExpression(filter=Filter(field_name="landingPage", string_filter=Filter.StringFilter(value="/products/", match_type=Filter.StringFilter.MatchType.CONTAINS)))
         limit_rows = 10000
@@ -304,10 +286,11 @@ else:
             time.sleep(1)
         st.rerun()
     elif page == "Landing Page Report":
-        # ... (Phần này không thay đổi)
+        # *** THAY ĐỔI: Khôi phục lại toàn bộ logic phân quyền và hiển thị ***
         st.title("Landing Page Report (Purchase Key Event)")
         date_options = ["Today", "Yesterday", "This Week", "Last Week", "Last 7 days", "Last 30 days", "Custom Range..."]
         selected_option = st.selectbox("Select Date Range", options=date_options, index=0)
+
         start_date, end_date = None, None
         if selected_option == "Custom Range...":
             today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
@@ -316,15 +299,17 @@ else:
             if len(selected_range) == 2: start_date, end_date = selected_range
         else:
             start_date, end_date = get_date_range(selected_option)
+
         if start_date and end_date:
             display_date = f"{start_date.strftime('%b %d, %Y')}" if start_date == end_date else f"{start_date.strftime('%b %d, %Y')} - {end_date.strftime('%b %d, %Y')}"
             st.markdown(f"**Displaying data for:** `{display_date}`")
             start_date_str, end_date_str = start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
             with st.spinner(f"Fetching data..."):
                 all_data_df = fetch_landing_page_data(start_date_str, end_date_str)
+                
                 if not all_data_df.empty:
                     if debug_mode:
-                        st.subheader("DEBUG MODE: Raw Data from Google Analytics"); st.write("Check the 'Marketer' column. If it shows 'N/A' for your pages, the mapping key in your JSON file is incorrect."); st.dataframe(all_data_df)
+                        st.subheader("DEBUG MODE: Raw Data from Google Analytics"); st.write("Check the 'Marketer' column."); st.dataframe(all_data_df)
                     else:
                         data_to_display = pd.DataFrame()
                         if user_info['role'] == 'admin':
@@ -333,10 +318,20 @@ else:
                             marketer_id = user_info['marketer_id']
                             employee_df = all_data_df[all_data_df['Marketer'] == marketer_id]
                             data_to_display = employee_df.sort_values(by="Sessions", ascending=False).head(20)
+
                         if not data_to_display.empty:
-                            total_sessions = data_to_display['Sessions'].sum(); total_key_events = data_to_display['Key Events (purchase)'].sum()
+                            total_sessions = data_to_display['Sessions'].sum()
+                            total_key_events = data_to_display['Key Events (purchase)'].sum()
                             total_rate = (total_key_events / total_sessions * 100) if total_sessions > 0 else 0
-                            total_row = pd.DataFrame([{"Marketer": "", "Landing page": "Total", "Sessions": total_sessions, "Key Events (purchase)": total_key_events, "Session Key Event Rate (purchase)": f"{total_rate:.2f}%"}])
+                            
+                            total_row_data = {
+                                "Marketer": "",
+                                "Landing page": "Total", 
+                                "Sessions": total_sessions, 
+                                "Key Events (purchase)": total_key_events, 
+                                "Session Key Event Rate (purchase)": f"{total_rate:.2f}%"
+                            }
+                            total_row = pd.DataFrame([total_row_data])
                             final_df = pd.concat([total_row, data_to_display], ignore_index=True)
                             st.dataframe(final_df.reset_index(drop=True))
                         else:
