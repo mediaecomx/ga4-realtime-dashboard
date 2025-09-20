@@ -67,12 +67,9 @@ def extract_core_and_symbol(title: str, symbols: list):
         if s in title:
             found_symbol = s
             break
-            
     cleaned_text = title.lower()
     cleaned_text = cleaned_text.split('–')[0].split(' - ')[0]
-    for s in symbols:
-        cleaned_text = cleaned_text.replace(s, '')
-    
+    for s in symbols: cleaned_text = cleaned_text.replace(s, '')
     cleaned_text = re.sub(r'[^\w\s]', '', cleaned_text, flags=re.UNICODE)
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
     return cleaned_text, found_symbol
@@ -126,31 +123,32 @@ def fetch_realtime_data():
         
         shopify_purchases_df, purchase_count_30min = fetch_shopify_realtime_purchases_rest()
 
-        if not ga_pages_df.empty:
-            ga_pages_df[['core_title', 'symbol']] = ga_pages_df['Page Title and Screen Class'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-            
-            if not shopify_purchases_df.empty:
-                shopify_purchases_df[['core_title', 'symbol']] = shopify_purchases_df['Product Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-                shopify_grouped = shopify_purchases_df.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index()
-                merged_df = pd.merge(ga_pages_df, shopify_grouped, on=['core_title', 'symbol'], how='left')
+        ga_pages_df_processed = ga_pages_df.copy()
+        shopify_purchases_df_processed = shopify_purchases_df.copy()
+        
+        if not ga_pages_df_processed.empty:
+            ga_pages_df_processed[['core_title', 'symbol']] = ga_pages_df_processed['Page Title and Screen Class'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
+            if not shopify_purchases_df_processed.empty:
+                shopify_purchases_df_processed[['core_title', 'symbol']] = shopify_purchases_df_processed['Product Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
+                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index()
+                merged_df = pd.merge(ga_pages_df_processed, shopify_grouped, on=['core_title', 'symbol'], how='left')
             else:
-                merged_df = ga_pages_df.copy(); merged_df['Purchases'] = 0
+                merged_df = ga_pages_df_processed.copy(); merged_df['Purchases'] = 0
 
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
             merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
-            
             final_pages_df = merged_df.sort_values(by="Active Users", ascending=False).head(10)
             final_pages_df = final_pages_df[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "CR"]]
         else:
-            final_pages_df = pd.DataFrame()
+            final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
         
         now_in_utc = datetime.now(pytz.utc)
-        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df
+        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df
     except Exception as e:
-        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame()
+        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# *** THAY ĐỔI: Tách biệt hai hàm mapping ***
+
 def get_marketer_from_page_title(title: str) -> str:
     for symbol, name in page_title_map.items():
         if symbol in title: return name
@@ -189,6 +187,7 @@ def fetch_landing_page_data(start_date: str, end_date: str):
         purchases_data = [{"Landing page": row.dimension_values[0].value, "Key Events (purchase)": int(row.metric_values[0].value)} for row in purchases_response.rows]
         purchases_df = pd.DataFrame(purchases_data)
         
+        merged_df = pd.DataFrame()
         if not sessions_df.empty:
             if not purchases_df.empty: merged_df = pd.merge(sessions_df, purchases_df, on="Landing page", how="left")
             else: merged_df = sessions_df.copy(); merged_df["Key Events (purchase)"] = 0
@@ -200,9 +199,9 @@ def fetch_landing_page_data(start_date: str, end_date: str):
             
             column_order = ["Marketer", "Landing page", "Sessions", "Key Events (purchase)", "Session Key Event Rate (purchase)"]
             all_data_df = merged_df.sort_values(by="Sessions", ascending=False)[column_order]
-            return all_data_df
-        else: return pd.DataFrame()
-    except Exception as e: st.error(f"Error fetching Landing Page data: {e}"); return pd.DataFrame()
+            return all_data_df, merged_df
+        else: return pd.DataFrame(), pd.DataFrame()
+    except Exception as e: st.error(f"Error fetching Landing Page data: {e}"); return pd.DataFrame(), pd.DataFrame()
 
 
 # --- LUỒNG CHÍNH CỦA ỨNG DỤNG ---
@@ -221,16 +220,32 @@ if not st.session_state['user_info']:
         else:
             st.error("Incorrect username or password")
 else:
-    user_info = st.session_state['user_info']
+    # *** THAY ĐỔI: Chuyển đổi sang dictionary để có thể thay đổi ***
+    user_info = dict(st.session_state['user_info'])
+    
     st.sidebar.success(f"Welcome, **{user_info['username']}**!")
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Choose a report:", ("Realtime Dashboard", "Landing Page Report"))
     if st.sidebar.button("Log Out"):
         st.session_state['user_info'] = None; cookies['username'] = None; cookies.save(); st.rerun()
-    debug_mode = False
+
     if user_info['role'] == 'admin':
+        st.sidebar.divider()
+        all_users = st.secrets.get("users", {})
+        employee_list = {v['username']: v['marketer_id'] for k, v in all_users.items() if v['role'] == 'employee'}
+        impersonation_options = ["None (View as Admin)"] + list(employee_list.keys())
+        selected_user = st.sidebar.selectbox("Impersonate User", options=impersonation_options)
+
+        if selected_user != "None (View as Admin)":
+            user_info['marketer_id'] = employee_list[selected_user]
+            user_info['role'] = 'employee'
+            st.sidebar.info(f"Viewing as **{selected_user}** (Marketer ID: {user_info['marketer_id']})")
+    
+    debug_mode = False
+    if st.session_state['user_info']['role'] == 'admin' and (locals().get('selected_user') == "None (View as Admin)" or 'selected_user' not in locals()):
         debug_mode = st.sidebar.checkbox("Enable Debug Mode")
-        if debug_mode: st.sidebar.warning("Debug mode is ON. Raw data is shown.")
+        if debug_mode: st.sidebar.warning("Debug mode is ON. Additional info is shown.")
+    
     if page == "Realtime Dashboard":
         st.title("Realtime Pages Dashboard")
         if 'selected_timezone_label' not in st.session_state: st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
@@ -239,10 +254,16 @@ else:
         timer_placeholder = st.empty()
         placeholder = st.empty()
         with placeholder.container():
-            active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df = fetch_realtime_data()
-            if active_users_5min is None: 
-                st.error(f"Error fetching data: {utc_fetch_time}")
+            fetch_result = fetch_realtime_data()
+            if fetch_result[0] is None: 
+                st.error(f"Error fetching data: {fetch_result[6]}")
             else:
+                active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df = fetch_result
+                
+                if user_info['role'] == 'employee':
+                    marketer_id = user_info['marketer_id']
+                    pages_df = pages_df[pages_df['Marketer'] == marketer_id]
+
                 selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
                 selected_tz = pytz.timezone(selected_tz_str)
                 localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
@@ -269,32 +290,30 @@ else:
                     fig.update_layout(xaxis_title=None, yaxis_title="Active Users", plot_bgcolor='rgba(0, 0, 0, 0)', paper_bgcolor='rgba(0, 0, 0, 0)', yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'), xaxis=dict(tickangle=-90))
                     st.plotly_chart(fig, use_container_width=True)
                 
-                if debug_mode:
-                    st.subheader("Debug Mode: Raw Data Inspection")
-                    st.write("Dưới đây là dữ liệu gốc từ hai nguồn trước khi được gộp.")
-                    st.write("1. Dữ liệu từ Google Analytics (Traffic):")
-                    st.code(ga_raw_df.to_dict('records'))
-                    st.write("2. Dữ liệu từ Shopify (Purchases):")
-                    st.code(shopify_raw_df.to_dict('records'))
-
                 st.subheader("Page and screen in last 30 minutes")
                 if not pages_df.empty:
-                    st.dataframe(
-                        pages_df.style.format({'CR': "{:.2f}%"}).applymap(highlight_purchases, subset=['Purchases', 'CR']),
-                        use_container_width=True
-                    )
+                    st.dataframe(pages_df.style.format({'CR': "{:.2f}%"}).applymap(highlight_purchases, subset=['Purchases', 'CR']), use_container_width=True)
                 else: 
                     st.write("No data available in the last 30 minutes.")
+                if debug_mode:
+                    st.divider()
+                    st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
+                    with st.expander("1. Raw Data from APIs"):
+                        st.write("**Google Analytics (Traffic):**"); st.code(ga_raw_df.to_dict('records'))
+                        st.write("**Shopify (Purchases):**"); st.code(shopify_raw_df.to_dict('records'))
+                    with st.expander("2. Processed Data (before merge)"):
+                        st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df)
+                        st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_processed_df.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index())
+                    with st.expander("3. Merged Data (full result before top 10)"):
+                        st.dataframe(merged_final_df)
         for seconds in range(REFRESH_INTERVAL_SECONDS, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True)
             time.sleep(1)
         st.rerun()
     elif page == "Landing Page Report":
-        # *** THAY ĐỔI: Khôi phục lại toàn bộ logic phân quyền và hiển thị chuẩn ***
         st.title("Landing Page Report (Purchase Key Event)")
         date_options = ["Today", "Yesterday", "This Week", "Last Week", "Last 7 days", "Last 30 days", "Custom Range..."]
         selected_option = st.selectbox("Select Date Range", options=date_options, index=0)
-
         start_date, end_date = None, None
         if selected_option == "Custom Range...":
             today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
@@ -303,39 +322,33 @@ else:
             if len(selected_range) == 2: start_date, end_date = selected_range
         else:
             start_date, end_date = get_date_range(selected_option)
-
         if start_date and end_date:
             display_date = f"{start_date.strftime('%b %d, %Y')}" if start_date == end_date else f"{start_date.strftime('%b %d, %Y')} - {end_date.strftime('%b %d, %Y')}"
             st.markdown(f"**Displaying data for:** `{display_date}`")
             start_date_str, end_date_str = start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
             with st.spinner(f"Fetching data..."):
-                all_data_df = fetch_landing_page_data(start_date_str, end_date_str)
-                
+                all_data_df, merged_raw_df = fetch_landing_page_data(start_date_str, end_date_str)
                 if not all_data_df.empty:
-                    if debug_mode:
-                        st.subheader("DEBUG MODE: Raw Data from Google Analytics"); st.dataframe(all_data_df)
+                    data_to_display = pd.DataFrame()
+                    if user_info['role'] == 'admin':
+                        data_to_display = all_data_df.head(20)
                     else:
-                        data_to_display = pd.DataFrame()
-                        if user_info['role'] == 'admin':
-                            data_to_display = all_data_df.head(20)
-                        else:
-                            marketer_id = user_info['marketer_id']
-                            employee_df = all_data_df[all_data_df['Marketer'] == marketer_id]
-                            data_to_display = employee_df.sort_values(by="Sessions", ascending=False).head(20)
-
-                        if not data_to_display.empty:
-                            total_sessions = data_to_display['Sessions'].sum()
-                            total_key_events = data_to_display['Key Events (purchase)'].sum()
-                            total_rate = (total_key_events / total_sessions * 100) if total_sessions > 0 else 0
-                            
-                            total_row_data = {
-                                "Marketer": "", "Landing page": "Total", "Sessions": total_sessions, 
-                                "Key Events (purchase)": total_key_events, "Session Key Event Rate (purchase)": f"{total_rate:.2f}%"
-                            }
-                            total_row = pd.DataFrame([total_row_data])
-                            final_df = pd.concat([total_row, data_to_display], ignore_index=True)
-                            st.dataframe(final_df.reset_index(drop=True))
-                        else:
-                            st.write("No data found for your user in the selected date range.")
+                        marketer_id = user_info['marketer_id']
+                        employee_df = all_data_df[all_data_df['Marketer'] == marketer_id]
+                        data_to_display = employee_df.sort_values(by="Sessions", ascending=False).head(20)
+                    if not data_to_display.empty:
+                        total_sessions = data_to_display['Sessions'].sum(); total_key_events = data_to_display['Key Events (purchase)'].sum()
+                        total_rate = (total_key_events / total_sessions * 100) if total_sessions > 0 else 0
+                        total_row_data = {"Marketer": "", "Landing page": "Total", "Sessions": total_sessions, "Key Events (purchase)": total_key_events, "Session Key Event Rate (purchase)": f"{total_rate:.2f}%"}
+                        total_row = pd.DataFrame([total_row_data])
+                        final_df = pd.concat([total_row, data_to_display], ignore_index=True)
+                        st.dataframe(final_df.reset_index(drop=True))
+                    else:
+                        st.write("No data found for your user in the selected date range.")
+                    if debug_mode:
+                        st.divider()
+                        st.subheader("🕵️‍♂️ Debug Mode: Landing Page Data Flow")
+                        st.expander("1. Merged GA Data (before assigning marketer)").code(f"{merged_raw_df.to_dict('records')}")
+                        st.expander("2. Final Data (with marketer assigned)").code(f"{all_data_df.to_dict('records')}")
                 else:
                     st.write("No product landing pages found with sessions in the selected date range.")
