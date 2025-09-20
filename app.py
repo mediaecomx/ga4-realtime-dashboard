@@ -152,7 +152,8 @@ def fetch_realtime_data():
 def get_marketer_from_page_title(title: str) -> str:
     for symbol, name in page_title_map.items():
         if symbol in title: return name
-    return "N/A"
+    # *** THAY ĐỔI: Thay "N/A" thành "" ***
+    return ""
 
 def get_marketer_from_landing_page(landing_page_url: str) -> str:
     landing_page_url_lower = landing_page_url.lower()
@@ -160,7 +161,8 @@ def get_marketer_from_landing_page(landing_page_url: str) -> str:
     for key_string, marketer_name in sorted_mapping_items:
         if key_string.lower() in landing_page_url_lower:
             return marketer_name
-    return "N/A"
+    # *** THAY ĐỔI: Thay "N/A" thành "" ***
+    return ""
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
     today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
@@ -220,9 +222,7 @@ if not st.session_state['user_info']:
         else:
             st.error("Incorrect username or password")
 else:
-    # *** THAY ĐỔI: Chuyển đổi sang dictionary để có thể thay đổi ***
     user_info = dict(st.session_state['user_info'])
-    
     st.sidebar.success(f"Welcome, **{user_info['username']}**!")
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Choose a report:", ("Realtime Dashboard", "Landing Page Report"))
@@ -259,7 +259,6 @@ else:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
                 active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df = fetch_result
-                
                 if user_info['role'] == 'employee':
                     marketer_id = user_info['marketer_id']
                     pages_df = pages_df[pages_df['Marketer'] == marketer_id]
