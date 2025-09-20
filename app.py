@@ -138,7 +138,7 @@ def fetch_realtime_data():
 
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
             merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
-            merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_landing_page)
+            merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
             
             final_pages_df = merged_df.sort_values(by="Active Users", ascending=False).head(10)
             final_pages_df = final_pages_df[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "CR"]]
@@ -150,14 +150,18 @@ def fetch_realtime_data():
     except Exception as e:
         return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame()
 
-
-def get_marketer_from_landing_page(title: str) -> str:
-    # Logic cho landing page (dựa vào chuỗi sku)
-    for key, name in landing_page_map.items():
-        if key.lower() in title.lower(): return name
-    # Logic cho page title (dựa vào biểu tượng)
+# *** THAY ĐỔI: Tách biệt hai hàm mapping ***
+def get_marketer_from_page_title(title: str) -> str:
     for symbol, name in page_title_map.items():
         if symbol in title: return name
+    return "N/A"
+
+def get_marketer_from_landing_page(landing_page_url: str) -> str:
+    landing_page_url_lower = landing_page_url.lower()
+    sorted_mapping_items = sorted(landing_page_map.items(), key=lambda item: len(item[0]), reverse=True)
+    for key_string, marketer_name in sorted_mapping_items:
+        if key_string.lower() in landing_page_url_lower:
+            return marketer_name
     return "N/A"
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
@@ -286,7 +290,7 @@ else:
             time.sleep(1)
         st.rerun()
     elif page == "Landing Page Report":
-        # *** THAY ĐỔI: Khôi phục lại toàn bộ logic phân quyền và hiển thị ***
+        # *** THAY ĐỔI: Khôi phục lại toàn bộ logic phân quyền và hiển thị chuẩn ***
         st.title("Landing Page Report (Purchase Key Event)")
         date_options = ["Today", "Yesterday", "This Week", "Last Week", "Last 7 days", "Last 30 days", "Custom Range..."]
         selected_option = st.selectbox("Select Date Range", options=date_options, index=0)
@@ -309,7 +313,7 @@ else:
                 
                 if not all_data_df.empty:
                     if debug_mode:
-                        st.subheader("DEBUG MODE: Raw Data from Google Analytics"); st.write("Check the 'Marketer' column."); st.dataframe(all_data_df)
+                        st.subheader("DEBUG MODE: Raw Data from Google Analytics"); st.dataframe(all_data_df)
                     else:
                         data_to_display = pd.DataFrame()
                         if user_info['role'] == 'admin':
@@ -325,11 +329,8 @@ else:
                             total_rate = (total_key_events / total_sessions * 100) if total_sessions > 0 else 0
                             
                             total_row_data = {
-                                "Marketer": "",
-                                "Landing page": "Total", 
-                                "Sessions": total_sessions, 
-                                "Key Events (purchase)": total_key_events, 
-                                "Session Key Event Rate (purchase)": f"{total_rate:.2f}%"
+                                "Marketer": "", "Landing page": "Total", "Sessions": total_sessions, 
+                                "Key Events (purchase)": total_key_events, "Session Key Event Rate (purchase)": f"{total_rate:.2f}%"
                             }
                             total_row = pd.DataFrame([total_row_data])
                             final_df = pd.concat([total_row, data_to_display], ignore_index=True)
