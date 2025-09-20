@@ -348,4 +348,5 @@ else:
                         else:
                             st.write("No data found for your user in the selected date range.")
                 else:
-                    st.write("No product landing pages found with sessions in the selected date range.")c
+                    st.write("No product landing pages found with sessions in the selected date range.")
+
