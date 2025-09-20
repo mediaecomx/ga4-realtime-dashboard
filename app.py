@@ -15,6 +15,7 @@ import pytz
 import numpy as np
 import re
 import requests
+import base64
 
 # --- CẤU HÌNH CHUNG ---
 PROPERTY_ID = "501726461"
@@ -53,8 +54,9 @@ try:
     ga_credentials = service_account.Credentials.from_service_account_info(st.secrets["google_credentials"], scopes=["https://www.googleapis.com/auth/analytics.readonly"])
     ga_client = BetaAnalyticsDataClient(credentials=ga_credentials)
     shopify_creds = st.secrets["shopify_credentials"]
+    imagebb_api_key = st.secrets["imagebb_credentials"]["api_key"]
 except Exception as e:
-    st.error(f"Lỗi khi khởi tạo Client: {e}"); st.stop()
+    st.error(f"Lỗi khi khởi tạo Client hoặc đọc secrets: {e}"); st.stop()
 
 # --- GIAO DIỆN CHUNG ---
 st.markdown("""<style>.stApp{background-color:black;color:white;}.stMetric{color:white;}.stDataFrame{color:white;}.stPlotlyChart{background-color:transparent;}.block-container{max-width:960px;}</style>""", unsafe_allow_html=True)
@@ -79,8 +81,15 @@ def highlight_purchases(val):
         return 'background-color: #023020; color: #23d123; font-weight: bold;'
     return ''
 
-# --- CÁC HÀM LẤY DỮ LIỆU ---
+@st.cache_data(show_spinner=False)
+def get_base64_of_local_image(file_path):
+    try:
+        with open(file_path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        return None
 
+# --- CÁC HÀM LẤY DỮ LIỆU ---
 @st.cache_data(ttl=60)
 def fetch_shopify_realtime_purchases_rest():
     try:
@@ -221,9 +230,20 @@ if not st.session_state['user_info']:
             st.error("Incorrect username or password")
 else:
     effective_user_info = dict(st.session_state['user_info'])
-    st.sidebar.success(f"Welcome, **{effective_user_info['username']}**!")
+    
+    avatar_url = effective_user_info.get("avatar_url", "")
+    if not avatar_url:
+        local_avatar_base64 = get_base64_of_local_image("avatar.jpg")
+        if local_avatar_base64:
+            avatar_url = f"data:image/jpeg;base64,{local_avatar_base64}"
+        else:
+            avatar_url = ""
+    welcome_card_html = f"""<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; margin-bottom: 20px;"><img src="{avatar_url}" style="width: 100px; height: 100px; border-radius: 50%; object-fit: cover; border: 2px solid #3c4043;"><p style="margin-top: 10px; margin-bottom: 0; font-size: 1em; color: #d0d0d0;">Welcome,</p><p style="margin: 0; font-size: 1.25em; font-weight: bold; color: #1ED760;">{effective_user_info['username']}</p></div>"""
+    st.sidebar.markdown(welcome_card_html, unsafe_allow_html=True)
+    
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Choose a report:", ("Realtime Dashboard", "Landing Page Report"))
+    page = st.sidebar.radio("Choose a report:", ("Realtime Dashboard", "Landing Page Report", "Profile"))
+    
     if st.sidebar.button("Log Out"):
         st.session_state['user_info'] = None; cookies['username'] = None; cookies.save(); st.rerun()
 
@@ -231,16 +251,13 @@ else:
     if st.session_state['user_info']['role'] == 'admin':
         st.sidebar.divider()
         all_users = st.secrets.get("users", {})
-        # Lấy thông tin đầy đủ của nhân viên để truy cập các thuộc tính khác
         employee_details = {v['username']: v for k, v in all_users.items() if v['role'] == 'employee'}
         impersonation_options = ["None (View as Admin)"] + list(employee_details.keys())
         selected_user_name = st.sidebar.selectbox("Impersonate User", options=impersonation_options)
 
         if selected_user_name != "None (View as Admin)":
             impersonating = True
-            # Lấy toàn bộ thông tin của nhân viên đang được giả lập
-            impersonated_user_details = employee_details[selected_user_name]
-            effective_user_info = impersonated_user_details
+            effective_user_info = employee_details[selected_user_name]
             st.sidebar.info(f"Viewing as **{selected_user_name}**")
     
     debug_mode = False
@@ -248,11 +265,51 @@ else:
         debug_mode = st.sidebar.checkbox("Enable Debug Mode")
         if debug_mode: st.sidebar.warning("Debug mode is ON.")
     
-    if page == "Realtime Dashboard":
+    if page == "Profile":
+        st.title("👤 Your Profile")
+        st.header("Update Your Avatar")
+        
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.write("Current Avatar:")
+            current_avatar_url = st.session_state['user_info'].get('avatar_url', "")
+            if current_avatar_url:
+                st.image(current_avatar_url, width=150)
+            else:
+                st.image("avatar.jpg", width=150)
+
+        with col2:
+            st.write("Upload a new image (JPG, PNG):")
+            uploaded_file = st.file_uploader("Choose a file", type=["jpg", "jpeg", "png"])
+
+            if uploaded_file is not None:
+                with st.spinner("Uploading to ImageBB..."):
+                    try:
+                        # *** THAY ĐỔI: Sửa lại cách gửi request đến ImageBB ***
+                        url = "https://api.imgbb.com/1/upload"
+                        payload = {"key": imagebb_api_key}
+                        files = {"image": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                        
+                        response = requests.post(url, params=payload, files=files)
+                        response.raise_for_status()
+                        
+                        imgbb_data = response.json()
+                        if imgbb_data.get('data'):
+                            new_link = imgbb_data['data']['url']
+                            st.success("Image uploaded successfully!")
+                            st.info("Please send this new link to your administrator to update your avatar:")
+                            st.code(new_link, language=None)
+                        else:
+                            st.error(f"Failed to upload image. API Error: {imgbb_data.get('error', {}).get('message', 'Unknown error')}")
+                        
+                    except Exception as e:
+                        st.error(f"Failed to upload image. Please try again. Error: {e}")
+
+    elif page == "Realtime Dashboard":
+        # ... (Phần này giữ nguyên)
         st.title("Realtime Pages Dashboard")
         if 'selected_timezone_label' not in st.session_state: st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
         st.session_state.selected_timezone_label = st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
-        
         timer_placeholder = st.empty()
         placeholder = st.empty()
         with placeholder.container():
@@ -261,23 +318,16 @@ else:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
                 active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df = fetch_result
-                
                 pages_to_display = pages_df_full.head(10)
-                # *** THAY ĐỔI: Logic phân quyền mới, dựa trên effective_user_info ***
-                can_view_all = (
-                    effective_user_info['role'] == 'admin' or 
-                    effective_user_info.get('can_view_all_realtime_data', False)
-                )
+                can_view_all = (effective_user_info['role'] == 'admin' or effective_user_info.get('can_view_all_realtime_data', False))
                 if not can_view_all:
                     marketer_id = effective_user_info['marketer_id']
                     pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
-
                 selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
                 selected_tz = pytz.timezone(selected_tz_str)
                 localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
                 last_update_time_str = localized_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
                 st.markdown(f"*Data fetched at: {last_update_time_str}*")
-                
                 top_col1, top_col2, top_col3 = st.columns(3)
                 top_col1.metric("ACTIVE USERS IN LAST 5 MIN", active_users_5min)
                 top_col2.metric("ACTIVE USERS IN LAST 30 MIN", active_users_30min)
@@ -312,7 +362,9 @@ else:
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True)
             time.sleep(1)
         st.rerun()
+
     elif page == "Landing Page Report":
+        # ... (Phần này giữ nguyên)
         st.title("Landing Page Report (Purchase Key Event)")
         date_options = ["Today", "Yesterday", "This Week", "Last Week", "Last 7 days", "Last 30 days", "Custom Range..."]
         selected_option = st.selectbox("Select Date Range", options=date_options, index=0)
