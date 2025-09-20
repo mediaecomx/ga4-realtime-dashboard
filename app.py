@@ -91,26 +91,37 @@ def fetch_realtime_data():
         kpi_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", metrics=[Metric(name="activeUsers")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0), MinuteRange(start_minutes_ago=4, end_minutes_ago=0)])
         pages_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", dimensions=[Dimension(name="unifiedScreenName")], metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)])
         per_min_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", dimensions=[Dimension(name="minutesAgo")], metrics=[Metric(name="activeUsers")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)])
-        kpi_response, pages_response, per_min_response = client.run_realtime_report(kpi_request), client.run_realtime_report(pages_request), client.run_realtime_report(per_min_request)
+        purchase_filter = FilterExpression(filter=Filter(field_name="eventName", string_filter=Filter.StringFilter(value="purchase")))
+        purchases_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", metrics=[Metric(name="eventCount")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)], dimension_filter=purchase_filter)
+
+        kpi_response, pages_response, per_min_response, purchases_response = (
+            client.run_realtime_report(kpi_request), client.run_realtime_report(pages_request),
+            client.run_realtime_report(per_min_request), client.run_realtime_report(purchases_request)
+        )
+
         active_users_30min, active_users_5min = (int(kpi_response.rows[0].metric_values[0].value) if len(kpi_response.rows) > 0 else 0), (int(kpi_response.rows[1].metric_values[0].value) if len(kpi_response.rows) > 1 else 0)
         pages_data, total_views = [], 0
         for row in pages_response.rows:
             page_title, page_users, page_views = row.dimension_values[0].value, int(row.metric_values[0].value), int(row.metric_values[1].value)
             total_views += page_views
-            marketer = ""
+            marketer = "N/A"
             for symbol, name in page_title_map.items():
                 if symbol in page_title: marketer = name; break
             pages_data.append({"Page Title and Screen Class": page_title, "Marketer": marketer, "Active Users": page_users, "Views": page_views})
         pages_df = pd.DataFrame(pages_data).sort_values(by="Active Users", ascending=False).head(10)
+
         per_min_data = {str(i): 0 for i in range(30)}
         for row in per_min_response.rows:
             min_ago, users = row.dimension_values[0].value, int(row.metric_values[0].value)
             per_min_data[min_ago] = users
         per_min_df = pd.DataFrame([{"Time": f"-{int(min_ago)} min", "Active Users": per_min_data[min_ago]} for min_ago in sorted(per_min_data.keys(), key=int)])
+        
+        purchase_count_30min = int(purchases_response.rows[0].metric_values[0].value) if purchases_response.rows else 0
         now_in_utc = datetime.now(pytz.utc)
-        return active_users_5min, active_users_30min, total_views, pages_df, per_min_df, now_in_utc
+        
+        return active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df, per_min_df, now_in_utc
     except Exception as e:
-        return None, None, None, None, None, str(e)
+        return None, None, None, None, None, None, str(e)
 
 
 def get_marketer_from_landing_page(landing_page_url: str) -> str:
@@ -119,7 +130,7 @@ def get_marketer_from_landing_page(landing_page_url: str) -> str:
     for key_string, marketer_name in sorted_mapping_items:
         if key_string.lower() in landing_page_url_lower:
             return marketer_name
-    return ""
+    return "N/A"
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
     today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
@@ -218,15 +229,16 @@ else:
     if page == "Realtime Dashboard":
         st.title("Realtime Pages Dashboard")
 
-        # *** THAY ĐỔI: Di chuyển Timezone Selector vào đây ***
         if 'selected_timezone_label' not in st.session_state:
             st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
         st.session_state.selected_timezone_label = st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
         
         placeholder = st.empty()
         with placeholder.container():
-            active_users_5min, active_users_30min, views, pages_df, per_min_df, utc_fetch_time = fetch_realtime_data()
-            if active_users_5min is None: st.error(f"Error fetching data: {utc_fetch_time}")
+            active_users_5min, active_users_30min, views, purchase_count_30min, pages_df, per_min_df, utc_fetch_time = fetch_realtime_data()
+            
+            if active_users_5min is None: 
+                st.error(f"Error fetching data: {utc_fetch_time}")
             else:
                 selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
                 selected_tz = pytz.timezone(selected_tz_str)
@@ -234,17 +246,57 @@ else:
                 last_update_time_str = localized_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
                 st.markdown(f"*Data fetched at: {last_update_time_str}*")
                 timer_placeholder = st.empty()
-                col1, col2, col3 = st.columns(3)
-                col1.metric("ACTIVE USERS IN LAST 5 MINUTES", active_users_5min); col2.metric("ACTIVE USERS IN LAST 30 MINUTES", active_users_30min); col3.metric("VIEWS IN LAST 30 MINUTES", views)
                 
+                # *** THAY ĐỔI: Sắp xếp lại layout KPI ***
+                
+                # Hàng trên cho các chỉ số traffic
+                top_col1, top_col2, top_col3 = st.columns(3)
+                top_col1.metric("ACTIVE USERS IN LAST 5 MIN", active_users_5min)
+                top_col2.metric("ACTIVE USERS IN LAST 30 MIN", active_users_30min)
+                top_col3.metric("VIEWS IN LAST 30 MIN", views)
+                
+                st.divider() # Thêm một đường kẻ ngang để phân tách
+
+                # Hàng dưới cho các chỉ số chuyển đổi chính
+                bottom_col1, bottom_col2 = st.columns(2)
+                
+                with bottom_col1:
+                    purchase_html = f"""
+                    <div style="background-color: #025402; border: 2px solid #057805; border-radius: 7px; padding: 20px; text-align: center; height: 100%;">
+                        <p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px; font-family: 'Source Sans Pro', sans-serif;">PURCHASES (30 MIN)</p>
+                        <p style="font-size: 32px; font-weight: bold; color: #23d123; margin: 0; font-family: 'Source Sans Pro', sans-serif;">{purchase_count_30min}</p>
+                    </div>
+                    """
+                    st.markdown(purchase_html, unsafe_allow_html=True)
+
+                with bottom_col2:
+                    if active_users_30min > 0:
+                        conversion_rate_30min = (purchase_count_30min / active_users_30min) * 100
+                    else:
+                        conversion_rate_30min = 0.0
+                    conversion_rate_str = f"{conversion_rate_30min:.2f}%"
+
+                    cr_html = f"""
+                    <div style="background-color: #013254; border: 2px solid #0564a8; border-radius: 7px; padding: 20px; text-align: center; height: 100%;">
+                        <p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px; font-family: 'Source Sans Pro', sans-serif;">CONVERSION RATE (30 MIN)</p>
+                        <p style="font-size: 32px; font-weight: bold; color: #23a7d1; margin: 0; font-family: 'Source Sans Pro', sans-serif;">{conversion_rate_str}</p>
+                    </div>
+                    """
+                    st.markdown(cr_html, unsafe_allow_html=True)
+                
+                st.divider()
+
                 if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
                     fig = px.bar(per_min_df, x="Time", y="Active Users", template="plotly_dark", color_discrete_sequence=['#4A90E2'])
                     fig.update_layout(xaxis_title=None, yaxis_title="Active Users", plot_bgcolor='rgba(0, 0, 0, 0)', paper_bgcolor='rgba(0, 0, 0, 0)', yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'), xaxis=dict(tickangle=-90))
                     st.plotly_chart(fig, use_container_width=True)
 
                 st.subheader("Page and screen in last 30 minutes")
-                if not pages_df.empty: st.table(pages_df.reset_index(drop=True))
-                else: st.write("No data available in the last 30 minutes.")
+                if not pages_df.empty: 
+                    st.table(pages_df.reset_index(drop=True))
+                else: 
+                    st.write("No data available in the last 30 minutes.")
+        
         for seconds in range(REFRESH_INTERVAL_SECONDS, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True)
             time.sleep(1)
@@ -274,7 +326,7 @@ else:
                 if not all_data_df.empty:
                     if debug_mode:
                         st.subheader("DEBUG MODE: Raw Data from Google Analytics")
-                        st.write("Check the 'Marketer' column. If it shows '' for your pages, the mapping key in your JSON file is incorrect.")
+                        st.write("Check the 'Marketer' column. If it shows 'N/A' for your pages, the mapping key in your JSON file is incorrect.")
                         st.dataframe(all_data_df)
                     else:
                         data_to_display = pd.DataFrame()
@@ -296,4 +348,4 @@ else:
                         else:
                             st.write("No data found for your user in the selected date range.")
                 else:
-                    st.write("No product landing pages found with sessions in the selected date range.")
+                    st.write("No product landing pages found with sessions in the selected date range.")c
