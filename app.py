@@ -15,10 +15,12 @@ import pytz
 import numpy as np
 import re
 import requests
+# *** THAY ĐỔI: Thêm dòng import còn thiếu ***
+from supabase import create_client, Client
 
 # --- CẤU HÌNH CHUNG ---
 PROPERTY_ID = "501726461"
-REFRESH_INTERVAL_SECONDS = 60
+# REFRESH_INTERVAL_SECONDS đã được xóa, giờ sẽ được tùy chỉnh
 
 # --- TẢI CÁC QUY TẮC MAPPING TỪ FILE JSON ---
 try:
@@ -53,8 +55,12 @@ try:
     ga_credentials = service_account.Credentials.from_service_account_info(st.secrets["google_credentials"], scopes=["https://www.googleapis.com/auth/analytics.readonly"])
     ga_client = BetaAnalyticsDataClient(credentials=ga_credentials)
     shopify_creds = st.secrets["shopify_credentials"]
-    imagebb_api_key = st.secrets["imagebb_credentials"]["api_key"]
+    cloudinary_cloud_name = st.secrets["cloudinary"]["cloud_name"]
+    cloudinary_upload_preset = st.secrets["cloudinary"]["upload_preset"]
     default_avatar_url = st.secrets["default_images"]["avatar_url"]
+    supabase_url = st.secrets["supabase"]["url"]
+    supabase_key = st.secrets["supabase"]["service_role_key"]
+    supabase: Client = create_client(supabase_url, supabase_key)
 except Exception as e:
     st.error(f"Lỗi khi khởi tạo Client hoặc đọc secrets: {e}"); st.stop()
 
@@ -217,7 +223,13 @@ if not st.session_state['user_info']:
     if st.button("Log In"):
         user_details = check_credentials(username, password)
         if user_details:
-            st.session_state['user_info'] = user_details; cookies['username'] = user_details['username']; cookies.save(); st.rerun()
+            st.session_state['user_info'] = user_details
+            try:
+                profile_data = supabase.table("profiles").select("avatar_url").eq("username", user_details['username']).single().execute()
+                if profile_data.data:
+                    st.session_state['user_info']['avatar_url'] = profile_data.data.get('avatar_url')
+            except: pass
+            cookies['username'] = user_details['username']; cookies.save(); st.rerun()
         else:
             st.error("Incorrect username or password")
 else:
@@ -258,45 +270,48 @@ else:
         col1, col2 = st.columns([1, 2])
         with col1:
             st.write("Current Avatar:")
-            # *** SỬA LỖI: Luôn dùng link, không đọc file cục bộ ***
             current_avatar_url = st.session_state['user_info'].get('avatar_url') or default_avatar_url
             if current_avatar_url:
                 st.image(current_avatar_url, width=150)
             else:
-                st.warning("No default avatar URL configured in secrets.toml")
+                st.warning("No avatar available.")
 
         with col2:
             st.write("Upload a new image (JPG, PNG):")
             uploaded_file = st.file_uploader("Choose a file", type=["jpg", "jpeg", "png"])
 
             if uploaded_file is not None:
-                with st.spinner("Uploading to ImageBB..."):
+                with st.spinner("Uploading to Cloudinary..."):
                     try:
-                        # *** SỬA LỖI: Gửi request đến ImageBB theo đúng định dạng `files` ***
-                        url = "https://api.imgbb.com/1/upload"
-                        params = {"key": imagebb_api_key}
-                        files = {"image": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                        upload_url = f"https://api.cloudinary.com/v1_1/{cloudinary_cloud_name}/image/upload"
+                        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type or "application/octet-stream")}
+                        data = {"upload_preset": cloudinary_upload_preset}
                         
-                        response = requests.post(url, params=params, files=files)
+                        response = requests.post(upload_url, files=files, data=data, timeout=30)
                         response.raise_for_status()
+                        payload = response.json()
+                        new_link = payload.get("secure_url")
                         
-                        imgbb_data = response.json()
-                        if imgbb_data.get('data'):
-                            new_link = imgbb_data['data']['url']
-                            st.success("Image uploaded successfully!")
-                            st.info("Please send this new link to your administrator to update your avatar:")
-                            st.code(new_link, language=None)
+                        if new_link:
+                            current_username = st.session_state['user_info']['username']
+                            supabase.table("profiles").upsert({"username": current_username, "avatar_url": new_link}).execute()
+                            st.session_state['user_info']['avatar_url'] = new_link
+                            st.success("Avatar updated successfully!")
+                            time.sleep(1)
+                            st.rerun()
                         else:
-                            st.error(f"Failed to upload image. API Error: {imgbb_data.get('error', {}).get('message', 'Unknown error')}")
-                        
+                            st.error(f"Upload succeeded but no URL returned. Response: {payload}")
                     except Exception as e:
                         st.error(f"Failed to upload image. Please try again. Error: {e}")
 
     elif page == "Realtime Dashboard":
-        # ... (Phần logic còn lại giữ nguyên)
         st.title("Realtime Pages Dashboard")
         if 'selected_timezone_label' not in st.session_state: st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
         st.session_state.selected_timezone_label = st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
+        refresh_interval = 180
+        if st.session_state['user_info']['role'] == 'admin' and not impersonating:
+            refresh_interval = st.sidebar.number_input("Set Refresh Interval (seconds)", min_value=60, value=60, step=10)
+        
         timer_placeholder = st.empty()
         placeholder = st.empty()
         with placeholder.container():
@@ -345,13 +360,12 @@ else:
                     with st.expander("1. Raw Data from APIs"): st.write("**Google Analytics (Traffic):**"); st.code(ga_raw_df.to_dict('records')); st.write("**Shopify (Purchases):**"); st.code(shopify_raw_df.to_dict('records'))
                     with st.expander("2. Processed Data (before merge)"): st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df); st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_processed_df.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index())
                     with st.expander("3. Merged Data (full result before final top 10)"): st.dataframe(merged_final_df)
-        for seconds in range(REFRESH_INTERVAL_SECONDS, 0, -1):
+        for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True)
             time.sleep(1)
         st.rerun()
 
     elif page == "Landing Page Report":
-        # ... (Phần này giữ nguyên)
         st.title("Landing Page Report (Purchase Key Event)")
         date_options = ["Today", "Yesterday", "This Week", "Last Week", "Last 7 days", "Last 30 days", "Custom Range..."]
         selected_option = st.selectbox("Select Date Range", options=date_options, index=0)
