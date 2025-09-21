@@ -15,6 +15,7 @@ import pytz
 import numpy as np
 import re
 import requests
+import base64
 # *** THAY ĐỔI: Thêm lại dòng import còn thiếu ***
 from supabase import create_client, Client
 
@@ -93,18 +94,26 @@ def fetch_shopify_realtime_purchases_rest():
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
         url = f"https://{shopify_creds['store_url']}/admin/api/{shopify_creds['api_version']}/orders.json"
         headers = {"X-Shopify-Access-Token": shopify_creds['access_token']}
-        params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "line_items"}
+        params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "line_items,total_shipping_price_set,subtotal_price"}
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         orders = response.json().get('orders', [])
         
         purchase_data = []
         for order in orders:
+            shipping_fee = float(order.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0.0))
+            subtotal = float(order.get('subtotal_price', 0.0))
+            
             for item in order.get('line_items', []):
+                item_price = float(item['price'])
+                item_quantity = item['quantity']
+                item_total_value = item_price * item_quantity
+                shipping_allocation = (shipping_fee * (item_total_value / subtotal)) if subtotal > 0 else 0
+                
                 purchase_data.append({
                     'Product Title': item['title'],
-                    'Purchases': item['quantity'],
-                    'Revenue': float(item['price']) * item['quantity']
+                    'Purchases': item_quantity,
+                    'Revenue': item_total_value + shipping_allocation
                 })
         
         if not purchase_data: return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue"]), 0
