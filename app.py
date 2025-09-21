@@ -323,35 +323,73 @@ else:
 
     elif page == "Realtime Dashboard":
         st.title("Realtime Pages Dashboard")
-        if 'selected_timezone_label' not in st.session_state: st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
-        st.session_state.selected_timezone_label = st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
-        refresh_interval = 180
-        if st.session_state['user_info']['role'] == 'admin' and not impersonating:
-            refresh_interval = st.sidebar.number_input("Set Refresh Interval (seconds)", min_value=60, value=60, step=10)
+
+        # --- CÀI ĐẶT CHUNG ---
+        if 'selected_timezone_label' not in st.session_state:
+            st.session_state.selected_timezone_label = "Viet Nam (UTC+7)"
+        st.sidebar.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
+
+        # === GIẢI PHÁP MỚI HOÀN TOÀN: SỬ DỤNG COOKIE ĐỂ LƯU REFRESH INTERVAL ===
         
+        # Bước 1: Đọc giá trị từ cookie khi tải trang.
+        # Nếu không có cookie, hoặc cookie bị lỗi, giá trị mặc định là 60.
+        try:
+            # cookies.get() trả về string, nên cần chuyển sang int
+            refresh_interval = int(cookies.get('refresh_interval', 60))
+        except (ValueError, TypeError):
+            refresh_interval = 60 # Đề phòng trường hợp cookie lưu giá trị không hợp lệ
+
+        # Bước 2: Hiển thị widget cho admin.
+        # Giá trị mặc định của widget (`value`) chính là giá trị đọc được từ cookie.
+        if st.session_state['user_info']['role'] == 'admin' and not impersonating:
+            new_interval = st.sidebar.number_input(
+                "Set Refresh Interval (seconds)",
+                min_value=60,
+                value=refresh_interval, # Hiển thị giá trị đã lưu
+                step=10,
+                key="refresh_interval_input" # Dùng key mới để tránh xung đột
+            )
+
+            # Bước 3: Nếu người dùng thay đổi giá trị, lưu giá trị mới vào cookie.
+            if new_interval != refresh_interval:
+                cookies['refresh_interval'] = str(new_interval)
+                cookies.save()
+                # Tải lại trang ngay lập tức để áp dụng giá trị mới cho bộ đếm ngược
+                st.rerun()
+            
+            # Cập nhật lại biến refresh_interval để bộ đếm giờ sử dụng
+            refresh_interval = new_interval
+
+        # --- BẮT ĐẦU HIỂN THỊ DỮ LIỆU ---
         timer_placeholder = st.empty()
         placeholder = st.empty()
         with placeholder.container():
             fetch_result = fetch_realtime_data()
-            if fetch_result[0] is None: 
+            if fetch_result[0] is None:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df = fetch_result
+                (active_users_5min, active_users_30min, total_views, purchase_count_30min,
+                 pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df,
+                 ga_processed_df, shopify_processed_df, merged_final_df) = fetch_result
+
                 pages_to_display = pages_df_full.head(10)
                 can_view_all = (effective_user_info['role'] == 'admin' or effective_user_info.get('can_view_all_realtime_data', False))
                 if not can_view_all:
                     marketer_id = effective_user_info['marketer_id']
                     pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
-                selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.selected_timezone_label]
+
+                selected_tz_str = TIMEZONE_MAPPINGS[st.session_state.timezone_selector]
                 selected_tz = pytz.timezone(selected_tz_str)
                 localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
                 last_update_time_str = localized_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
                 st.markdown(f"*Data fetched at: {last_update_time_str}*")
+
                 top_col1, top_col2, top_col3 = st.columns(3)
                 top_col1.metric("ACTIVE USERS IN LAST 5 MIN", active_users_5min)
                 top_col2.metric("ACTIVE USERS IN LAST 30 MIN", active_users_30min)
                 top_col3.metric("VIEWS IN LAST 30 MIN", total_views)
                 st.divider()
+
                 bottom_col1, bottom_col2 = st.columns(2)
                 with bottom_col1:
                     purchase_html = f"""<div style="background-color: #025402; border: 2px solid #057805; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px; font-family: 'Source Sans Pro', sans-serif;">PURCHASES (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23d123; margin: 0; font-family: 'Source Sans Pro', sans-serif;">{purchase_count_30min}</p></div>"""
@@ -362,11 +400,12 @@ else:
                     cr_html = f"""<div style="background-color: #013254; border: 2px solid #0564a8; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px; font-family: 'Source Sans Pro', sans-serif;">CONVERSION RATE (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23a7d1; margin: 0; font-family: 'Source Sans Pro', sans-serif;">{conversion_rate_str}</p></div>"""
                     st.markdown(cr_html, unsafe_allow_html=True)
                 st.divider()
+
                 if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
                     fig = px.bar(per_min_df, x="Time", y="Active Users", template="plotly_dark", color_discrete_sequence=['#4A90E2'])
                     fig.update_layout(xaxis_title=None, yaxis_title="Active Users", plot_bgcolor='rgba(0, 0, 0, 0)', paper_bgcolor='rgba(0, 0, 0, 0)', yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'), xaxis=dict(tickangle=-90))
                     st.plotly_chart(fig, use_container_width=True)
-                
+
                 st.subheader("Page and screen in last 30 minutes")
                 if not pages_to_display.empty:
                     st.dataframe(
@@ -376,13 +415,23 @@ else:
                         }).applymap(highlight_metrics, subset=['Purchases', 'Revenue', 'CR']),
                         use_container_width=True
                     )
-                else: 
+                else:
                     st.write("No data available for your user.")
+
                 if debug_mode:
-                    st.divider(); st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
-                    with st.expander("1. Raw Data from APIs"): st.write("**Google Analytics (Traffic):**"); st.code(ga_raw_df.to_dict('records')); st.write("**Shopify (Purchases):**"); st.code(shopify_raw_df.to_dict('records'))
-                    with st.expander("2. Processed Data (before merge)"): st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df); st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_purchases_df.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index())
-                    with st.expander("3. Merged Data (full result before final top 10)"): st.dataframe(merged_final_df)
+                    st.divider()
+                    st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
+                    with st.expander("1. Raw Data from APIs"):
+                        st.write("**Google Analytics (Traffic):**"); st.code(ga_raw_df.to_dict('records'))
+                        st.write("**Shopify (Purchases):**"); st.code(shopify_raw_df.to_dict('records'))
+                    with st.expander("2. Processed Data (before merge)"):
+                        st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df)
+                        st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_purchases_df.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index())
+                    with st.expander("3. Merged Data (full result before final top 10)"):
+                        st.dataframe(merged_final_df)
+
+        # --- BỘ ĐẾM NGƯỢC ---
+        # Vòng lặp sẽ sử dụng biến `refresh_interval` đã được đọc từ cookie (hoặc vừa được cập nhật)
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True)
             time.sleep(1)
