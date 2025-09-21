@@ -15,12 +15,11 @@ import pytz
 import numpy as np
 import re
 import requests
-# *** THAY ĐỔI: Thêm dòng import còn thiếu ***
+# *** THAY ĐỔI: Thêm lại dòng import còn thiếu ***
 from supabase import create_client, Client
 
 # --- CẤU HÌNH CHUNG ---
 PROPERTY_ID = "501726461"
-# REFRESH_INTERVAL_SECONDS đã được xóa, giờ sẽ được tùy chỉnh
 
 # --- TẢI CÁC QUY TẮC MAPPING TỪ FILE JSON ---
 try:
@@ -82,7 +81,7 @@ def extract_core_and_symbol(title: str, symbols: list):
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
     return cleaned_text, found_symbol
     
-def highlight_purchases(val):
+def highlight_metrics(val):
     if isinstance(val, (int, float)) and val > 0:
         return 'background-color: #023020; color: #23d123; font-weight: bold;'
     return ''
@@ -99,14 +98,22 @@ def fetch_shopify_realtime_purchases_rest():
         response.raise_for_status()
         orders = response.json().get('orders', [])
         
-        purchase_data = [{'Product Title': item['title'], 'Purchases': item['quantity']} for order in orders for item in order.get('line_items', [])]
-        if not purchase_data: return pd.DataFrame(columns=["Product Title", "Purchases"]), 0
+        purchase_data = []
+        for order in orders:
+            for item in order.get('line_items', []):
+                purchase_data.append({
+                    'Product Title': item['title'],
+                    'Purchases': item['quantity'],
+                    'Revenue': float(item['price']) * item['quantity']
+                })
+        
+        if not purchase_data: return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue"]), 0
         
         purchases_df = pd.DataFrame(purchase_data)
         total_purchases = purchases_df['Purchases'].sum()
         return purchases_df, total_purchases
     except Exception as e:
-        return pd.DataFrame(columns=["Product Title", "Purchases"]), 0
+        return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue"]), 0
 
 @st.cache_data(ttl=60)
 def fetch_realtime_data():
@@ -137,16 +144,17 @@ def fetch_realtime_data():
             ga_pages_df_processed[['core_title', 'symbol']] = ga_pages_df_processed['Page Title and Screen Class'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
             if not shopify_purchases_df_processed.empty:
                 shopify_purchases_df_processed[['core_title', 'symbol']] = shopify_purchases_df_processed['Product Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index()
+                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index()
                 merged_df = pd.merge(ga_pages_df_processed, shopify_grouped, on=['core_title', 'symbol'], how='left')
             else:
-                merged_df = ga_pages_df_processed.copy(); merged_df['Purchases'] = 0
+                merged_df = ga_pages_df_processed.copy(); merged_df['Purchases'] = 0; merged_df['Revenue'] = 0.0
 
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
+            merged_df["Revenue"] = merged_df["Revenue"].fillna(0).astype(float)
             merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
             final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)
-            final_pages_df = final_pages_df[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "CR"]]
+            final_pages_df = final_pages_df[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR"]]
         else:
             final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
         
@@ -352,13 +360,19 @@ else:
                 
                 st.subheader("Page and screen in last 30 minutes")
                 if not pages_to_display.empty:
-                    st.dataframe(pages_to_display.style.format({'CR': "{:.2f}%"}).applymap(highlight_purchases, subset=['Purchases', 'CR']), use_container_width=True)
+                    st.dataframe(
+                        pages_to_display.style.format({
+                            'CR': "{:.2f}%",
+                            'Revenue': "${:,.2f}"
+                        }).applymap(highlight_metrics, subset=['Purchases', 'Revenue', 'CR']),
+                        use_container_width=True
+                    )
                 else: 
                     st.write("No data available for your user.")
                 if debug_mode:
                     st.divider(); st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
                     with st.expander("1. Raw Data from APIs"): st.write("**Google Analytics (Traffic):**"); st.code(ga_raw_df.to_dict('records')); st.write("**Shopify (Purchases):**"); st.code(shopify_raw_df.to_dict('records'))
-                    with st.expander("2. Processed Data (before merge)"): st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df); st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_processed_df.groupby(['core_title', 'symbol'])['Purchases'].sum().reset_index())
+                    with st.expander("2. Processed Data (before merge)"): st.write("**GA Processed (with core_title & symbol):**"); st.dataframe(ga_processed_df); st.write("**Shopify Processed & Grouped (with core_title & symbol):**"); st.dataframe(shopify_purchases_df.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index())
                     with st.expander("3. Merged Data (full result before final top 10)"): st.dataframe(merged_final_df)
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True)
