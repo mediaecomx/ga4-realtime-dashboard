@@ -35,7 +35,8 @@ except (json.JSONDecodeError, KeyError):
 
 # Định nghĩa các múi giờ và danh sách biểu tượng
 TIMEZONE_MAPPINGS = {"Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh", "New York (UTC-4)": "America/New_York", "Chicago (UTC-5)": "America/Chicago", "Denver (UTC-6)": "America/Denver", "Los Angeles (UTC-7)": "America/Los_Angeles", "Anchorage (UTC-8)": "America/Anchorage", "Honolulu (UTC-10)": "Pacific/Honolulu"}
-SYMBOLS = list(page_title_map.keys())
+# *** SỬA LỖI LOGIC MAPPING: Sắp xếp các symbol theo độ dài giảm dần ***
+SYMBOLS = sorted(list(page_title_map.keys()), key=len, reverse=True)
 
 # --- KẾT NỐI VÀ XÁC THỰC ---
 cookies = EncryptedCookieManager(password=st.secrets["cookie"]["encrypt_key"])
@@ -73,13 +74,15 @@ except Exception as e:
 st.markdown("""<style>.stApp{background-color:black;color:white;}.stMetric{color:white;}.stDataFrame{color:white;}.stPlotlyChart{background-color:transparent;}.block-container{max-width:960px;}</style>""", unsafe_allow_html=True)
 
 # --- CÁC HÀM TIỆN ÍCH ---
+# *** SỬA LỖI LOGIC MAPPING: Cập nhật hàm để sử dụng danh sách symbol đã được sắp xếp ***
 def extract_core_and_symbol(title: str, symbols: list):
     found_symbol = ""
     title_str = str(title) 
+    # Danh sách symbols đã được sắp xếp từ dài đến ngắn, nên sẽ tìm thấy MKT11 trước MKT1
     for s in symbols:
         if s in title_str:
             found_symbol = s
-            break
+            break # Dừng lại ngay khi tìm thấy kết quả khớp dài nhất
     cleaned_text = title_str.lower().split('–')[0].split(' - ')[0]
     for s in symbols: cleaned_text = cleaned_text.replace(s, '')
     cleaned_text = re.sub(r'[^\w\s]', '', cleaned_text, flags=re.UNICODE).strip()
@@ -89,6 +92,14 @@ def highlight_metrics(val):
     if isinstance(val, (int, float)) and val > 0:
         return 'background-color: #023020; color: #23d123; font-weight: bold;'
     return ''
+
+# *** SỬA LỖI LOGIC MAPPING: Cập nhật hàm để ưu tiên kết quả khớp dài nhất ***
+def get_marketer_from_page_title(title: str) -> str:
+    # SYMBOLS đã được sắp xếp theo độ dài giảm dần ở phần cấu hình
+    for symbol in SYMBOLS:
+        if symbol in title:
+            return page_title_map[symbol]
+    return ""
 
 # --- CÁC HÀM LẤY DỮ LIỆU ---
 @st.cache_data(ttl=60)
@@ -155,11 +166,6 @@ def fetch_realtime_data():
         return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df
     except Exception as e:
         return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-def get_marketer_from_page_title(title: str) -> str:
-    for symbol, name in page_title_map.items():
-        if symbol in title: return name
-    return ""
 
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
     today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
@@ -283,7 +289,7 @@ def fetch_historical_page_report(start_date: str, end_date: str, segment: str):
             **{'Page Title': ('Page Title', 'first'), 'Sessions': ('Sessions', 'sum'), 'Users': ('Users', 'sum'), 'Purchases': ('Purchases', 'first'), 'Revenue': ('Revenue', 'first')}
         ).reset_index()
 
-        final_grouped_df['Marketer'] = final_grouped_df['symbol'].map(page_title_map).fillna('')
+        final_grouped_df['Marketer'] = final_grouped_df['Page Title'].apply(get_marketer_from_page_title)
         final_grouped_df['Session CR'] = np.divide(final_grouped_df['Purchases'], final_grouped_df['Sessions'], out=np.zeros_like(final_grouped_df['Sessions'], dtype=float), where=(final_grouped_df['Sessions']!=0)) * 100
         final_grouped_df['User CR'] = np.divide(final_grouped_df['Purchases'], final_grouped_df['Users'], out=np.zeros_like(final_grouped_df['Users'], dtype=float), where=(final_grouped_df['Users']!=0)) * 100
         
