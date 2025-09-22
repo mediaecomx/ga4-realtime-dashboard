@@ -8,7 +8,18 @@
     "💖": "MKT1",
     "💙": "MKT2",
     "💛": "MKT5",
-    "♥️": "MKT7"
+    "♥️": "MKT7",
+
+    "MKT1": "MKT1",
+    "MKT2": "MKT2",
+    "MKT5": "MKT5",
+    "MKT6": "MKT6",
+    "MKT7": "MKT7",
+    "MKT9": "MKT9",
+    "MKT11": "MKT11",
+    "MKT12": "MKT12",
+    "MKT14": "MKT14",
+    "MKT16": "MKT16"
   },
   "landing_page_mapping": {
     "sku-mkt1": "MKT1",
