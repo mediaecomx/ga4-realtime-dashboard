@@ -23,14 +23,11 @@ from urllib.parse import urlparse
 PROPERTY_ID = "501726461"
 
 # --- BẮT ĐẦU CẤU HÌNH CHO THẺ NHIỆT ---
-# Bạn có thể thay đổi các giá trị "TARGET" này để điều chỉnh độ nhạy của màu sắc.
 TARGET_USERS_5MIN = 50
 TARGET_USERS_30MIN = 200
 TARGET_VIEWS_30MIN = 1000
-
-# Định nghĩa dải màu từ LẠNH sang NÓNG (định dạng (R, G, B))
-COLOR_COLD = (40, 40, 60)   # Xanh xám đậm (màu lạnh)
-COLOR_HOT = (255, 190, 0)  # Vàng cam rực (màu nóng)
+COLOR_COLD = (40, 40, 60)
+COLOR_HOT = (255, 190, 0)
 # --- KẾT THÚC CẤU HÌNH CHO THẺ NHIỆT ---
 
 # --- TẢI CÁC QUY TẮC MAPPING TỪ FILE JSON ---
@@ -44,7 +41,6 @@ except FileNotFoundError:
 except (json.JSONDecodeError, KeyError):
     st.error("Lỗi: File marketer_mapping.json có cấu trúc không hợp lệ."); st.stop()
 
-# Định nghĩa các múi giờ và danh sách biểu tượng
 TIMEZONE_MAPPINGS = {"Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh", "New York (UTC-4)": "America/New_York", "Chicago (UTC-5)": "America/Chicago", "Denver (UTC-6)": "America/Denver", "Los Angeles (UTC-7)": "America/Los_Angeles", "Anchorage (UTC-8)": "America/Anchorage", "Honolulu (UTC-10)": "Pacific/Honolulu"}
 SYMBOLS = sorted(list(page_title_map.keys()), key=len, reverse=True)
 
@@ -65,10 +61,7 @@ def check_credentials(username, password):
 try:
     google_creds_dict = dict(st.secrets["google_credentials"])
     google_creds_dict["private_key"] = google_creds_dict["private_key"].replace("\\n", "\n")
-    ga_credentials = service_account.Credentials.from_service_account_info(
-        google_creds_dict, 
-        scopes=["https://www.googleapis.com/auth/analytics.readonly"]
-    )
+    ga_credentials = service_account.Credentials.from_service_account_info(google_creds_dict, scopes=["https://www.googleapis.com/auth/analytics.readonly"])
     ga_client = BetaAnalyticsDataClient(credentials=ga_credentials)
     shopify_creds = st.secrets["shopify_credentials"]
     cloudinary_cloud_name = st.secrets["cloudinary"]["cloud_name"]
@@ -389,6 +382,11 @@ else:
                     st.markdown(f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">VIEWS (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{total_views}</p></div>""", unsafe_allow_html=True)
                 
                 st.divider()
+
+                bottom_col1, bottom_col2 = st.columns(2)
+                with bottom_col1: st.markdown(f"""<div style="background-color: #025402; border: 2px solid #057805; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">PURCHASES (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23d123; margin: 0;">{purchase_count_30min}</p></div>""", unsafe_allow_html=True)
+                with bottom_col2: st.markdown(f"""<div style="background-color: #013254; border: 2px solid #0564a8; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">CONVERSION RATE (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23a7d1; margin: 0;">{(purchase_count_30min / active_users_30min * 100) if active_users_30min > 0 else 0:.2f}%</p></div>""", unsafe_allow_html=True)
+                
                 if not pages_df_full.empty:
                     marketer_summary = pages_df_full.groupby('Marketer')['Active Users'].sum()
                     current_snapshot = marketer_summary.to_dict()
@@ -400,6 +398,7 @@ else:
                 history_df = pd.DataFrame(st.session_state.realtime_history).set_index('timestamp')
                 history_df_melted = history_df.reset_index().melt(id_vars='timestamp', var_name='Marketer', value_name='Active Users').dropna(subset=['Active Users'])
                 
+                st.divider()
                 st.subheader("Active Users Trend by Marketer (Live)")
                 if not history_df_melted.empty:
                     fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', color_discrete_sequence=px.colors.qualitative.Plotly)
@@ -428,9 +427,29 @@ else:
                     marketer_id = effective_user_info['marketer_id']
                     pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
                 if not pages_to_display.empty:
-                    st.dataframe(pages_to_display.style.format({'CR': "{:.2f}%", 'Revenue': "${:,.2f}"}).applymap(highlight_metrics, subset=['Purchases', 'Revenue', 'CR']), use_container_width=True)
+                    column_config_realtime = {
+                        "Page Title and Screen Class": st.column_config.TextColumn("Page Title", width=400),
+                        "Marketer": st.column_config.TextColumn(width=100),
+                        "Active Users": st.column_config.NumberColumn(width=120),
+                        "Purchases": st.column_config.NumberColumn(width=100),
+                        "Revenue": st.column_config.NumberColumn(format="$%.2f", width=120),
+                        "CR": st.column_config.NumberColumn(format="%.2f%%", width=100)
+                    }
+                    st.dataframe(pages_to_display, use_container_width=True, column_config=column_config_realtime)
                 else:
                     st.write("No data available for your user.")
+                if debug_mode:
+                    st.divider(); st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
+                    with st.expander("1. Raw Data from APIs"):
+                        st.write("GA (Traffic):"); st.dataframe(ga_raw_df); st.code(ga_raw_df.to_json(orient='records', indent=2))
+                        st.write("Shopify (Purchases):"); st.dataframe(shopify_raw_df); st.code(shopify_raw_df.to_json(orient='records', indent=2))
+                    with st.expander("2. Processed Data (before merge)"):
+                        st.write("GA Processed:"); st.dataframe(ga_processed_df); st.code(ga_processed_df.to_json(orient='records', indent=2))
+                        st.write("Shopify Processed & Grouped:"); 
+                        shopify_grouped_debug = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index()
+                        st.dataframe(shopify_grouped_debug); st.code(shopify_grouped_debug.to_json(orient='records', indent=2))
+                    with st.expander("3. Merged Data"):
+                        st.dataframe(merged_final_df); st.code(merged_final_df.to_json(orient='records', indent=2))
 
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True); time.sleep(1)
@@ -477,6 +496,29 @@ else:
                             total_user_cr = (total_purchases / total_users * 100) if total_users > 0 else 0
                             total_row = pd.DataFrame([{"Page Title": "Total", "Marketer": "", "Sessions": total_sessions, "Users": total_users, "Purchases": total_purchases, "Revenue": total_revenue, "Session CR": total_session_cr, "User CR": total_user_cr}])
                             data_to_display = pd.concat([total_row, data_to_display], ignore_index=True)
-                        st.dataframe(data_to_display.style.format({'Revenue': "${:,.2f}", 'Session CR': "{:.2f}%", 'User CR': "{:.2f}%"}).applymap(highlight_metrics, subset=['Purchases', 'Revenue', 'Session CR', 'User CR']), use_container_width=True)
+                        column_config_historical = {
+                            "Date": st.column_config.TextColumn(width=120),
+                            "Week": st.column_config.TextColumn(width=120),
+                            "Page Title": st.column_config.TextColumn(width=350),
+                            "Marketer": st.column_config.TextColumn(width=100),
+                            "Sessions": st.column_config.NumberColumn(width=100),
+                            "Users": st.column_config.NumberColumn(width=100),
+                            "Purchases": st.column_config.NumberColumn(width=100),
+                            "Revenue": st.column_config.NumberColumn(format="$%.2f", width=150),
+                            "Session CR": st.column_config.NumberColumn(format="%.2f%%", width=120),
+                            "User CR": st.column_config.NumberColumn(format="%.2f%%", width=120)
+                        }
+                        st.dataframe(data_to_display.style.format({'Revenue': "${:,.2f}", 'Session CR': "{:.2f}%", 'User CR': "{:.2f}%"}).applymap(highlight_metrics, subset=['Purchases', 'Revenue', 'Session CR', 'User CR']), use_container_width=True, column_config=column_config_historical)
                     else: st.write("No data found for your user/filters in the selected date range.")
+                    if debug_mode:
+                        st.divider()
+                        st.subheader(f"🕵️‍♂️ Debug Mode: Page Performance Data Flow ({segment_option})")
+                        with st.expander("1. Raw Google Analytics Data"):
+                            st.dataframe(ga_raw_df); st.code(ga_raw_df.to_json(orient='records', indent=2))
+                        with st.expander("2. Raw Shopify Data"):
+                            st.dataframe(shopify_raw_df); st.code(shopify_raw_df.to_json(orient='records', indent=2))
+                        with st.expander("3. Merged Data (Before final grouping)"):
+                            st.dataframe(merged_df); st.code(merged_df.to_json(orient='records', indent=2))
+                        with st.expander("4. Final Data (Grouped, with Marketer, Sorted)"):
+                            st.dataframe(all_data_df); st.code(all_data_df.to_json(orient='records', indent=2))
                 else: st.write("No page data found with sessions in the selected date range.")
