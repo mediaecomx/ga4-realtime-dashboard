@@ -4,7 +4,7 @@ import plotly.express as px
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     RunRealtimeReportRequest, RunReportRequest, Dimension, Metric, MinuteRange,
-    DateRange, FilterExpression, FilterExpressionList, Filter
+    DateRange
 )
 from google.oauth2 import service_account
 import time
@@ -15,19 +15,28 @@ import pytz
 import numpy as np
 import re
 import requests
-import base64
 from supabase import create_client, Client
-from urllib.parse import urlparse
 
 # --- CẤU HÌNH CHUNG ---
 PROPERTY_ID = "501726461"
+
+# --- BẮT ĐẦU CẤU HÌNH CHO THẺ NHIỆT ---
+# Bạn có thể thay đổi các giá trị "TARGET" này để điều chỉnh độ nhạy của màu sắc.
+# Đây là ngưỡng mà tại đó thẻ sẽ đạt màu sắc nóng nhất.
+TARGET_USERS_5MIN = 100
+TARGET_USERS_30MIN = 500
+TARGET_VIEWS_30MIN = 1000
+
+# Định nghĩa dải màu từ LẠNH sang NÓNG (định dạng (R, G, B))
+COLOR_COLD = (40, 40, 60)   # Xanh xám đậm (màu lạnh)
+COLOR_HOT = (255, 190, 0)  # Vàng cam rực (màu nóng)
+# --- KẾT THÚC CẤU HÌNH CHO THẺ NHIỆT ---
 
 # --- TẢI CÁC QUY TẮC MAPPING TỪ FILE JSON ---
 try:
     with open('marketer_mapping.json', 'r', encoding='utf-8') as f:
         full_mapping = json.load(f)
         page_title_map = full_mapping.get('page_title_mapping', {})
-        landing_page_map = full_mapping.get('landing_page_mapping', {})
 except FileNotFoundError:
     st.error("Lỗi: Không tìm thấy file marketer_mapping.json."); st.stop()
 except (json.JSONDecodeError, KeyError):
@@ -35,7 +44,6 @@ except (json.JSONDecodeError, KeyError):
 
 # Định nghĩa các múi giờ và danh sách biểu tượng
 TIMEZONE_MAPPINGS = {"Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh", "New York (UTC-4)": "America/New_York", "Chicago (UTC-5)": "America/Chicago", "Denver (UTC-6)": "America/Denver", "Los Angeles (UTC-7)": "America/Los_Angeles", "Anchorage (UTC-8)": "America/Anchorage", "Honolulu (UTC-10)": "Pacific/Honolulu"}
-# *** SỬA LỖI LOGIC MAPPING: Sắp xếp các symbol theo độ dài giảm dần ***
 SYMBOLS = sorted(list(page_title_map.keys()), key=len, reverse=True)
 
 # --- KẾT NỐI VÀ XÁC THỰC ---
@@ -74,6 +82,22 @@ except Exception as e:
 st.markdown("""<style>.stApp{background-color:black;color:white;}.stMetric{color:white;}.stDataFrame{color:white;}.stPlotlyChart{background-color:transparent;}.block-container{max-width:960px;}</style>""", unsafe_allow_html=True)
 
 # --- CÁC HÀM TIỆN ÍCH ---
+def get_heatmap_color_and_text(value, target, cold_color, hot_color):
+    """
+    Tính toán màu nền và màu chữ dựa trên giá trị và mục tiêu.
+    """
+    if target == 0:
+        bg_rgb = cold_color
+    else:
+        ratio = min(1.0, value / target)
+        r = int(cold_color[0] + ratio * (hot_color[0] - cold_color[0]))
+        g = int(cold_color[1] + ratio * (hot_color[1] - cold_color[1]))
+        b = int(cold_color[2] + ratio * (hot_color[2] - cold_color[2]))
+        bg_rgb = (r, g, b)
+    brightness = (bg_rgb[0] * 299 + bg_rgb[1] * 587 + bg_rgb[2] * 114) / 1000
+    text_color = "#FFFFFF" if brightness < 140 else "#000000"
+    return f"rgb({bg_rgb[0]},{bg_rgb[1]},{bg_rgb[2]})", text_color
+
 def extract_core_and_symbol(title: str, symbols: list):
     found_symbol = ""
     title_str = str(title)
@@ -94,7 +118,7 @@ def highlight_metrics(val):
 def get_marketer_from_page_title(title: str) -> str:
     for symbol in SYMBOLS:
         if symbol in title:
-            return page_title_map[symbol]
+            return page_title_map.get(symbol, "")
     return ""
 
 # --- CÁC HÀM LẤY DỮ LIỆU ---
@@ -154,75 +178,13 @@ def fetch_realtime_data():
             merged_df["Revenue"] = merged_df["Revenue"].fillna(0).astype(float)
             merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
-            final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)
-            final_pages_df = final_pages_df[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR"]]
+            final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR"]]
         else:
-            final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
+            final_pages_df = pd.DataFrame()
         now_in_utc = datetime.now(pytz.utc)
         return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc
     except Exception as e:
         return None, None, None, None, None, None, str(e)
-
-def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
-    today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
-    if selection == "Today": start_date = end_date = today
-    elif selection == "Yesterday": start_date = end_date = today - timedelta(days=1)
-    elif selection == "This Week": start_date = today - timedelta(days=today.weekday()); end_date = today
-    elif selection == "Last Week": end_date = today - timedelta(days=today.weekday() + 1); start_date = end_date - timedelta(days=6)
-    elif selection == "Last 7 days": start_date = today - timedelta(days=6); end_date = today
-    elif selection == "Last 30 days": start_date = today - timedelta(days=29); end_date = today
-    else: start_date = end_date = today
-    return start_date, end_date
-
-@st.cache_data
-def fetch_shopify_historical_purchases_by_title(start_date: str, end_date: str, segment: str):
-    purchase_data = []
-    tz = pytz.timezone('Asia/Ho_Chi_Minh')
-    start_dt_obj = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt_obj = datetime.strptime(end_date, "%Y-%m-%d")
-    start_time_aware = tz.localize(start_dt_obj)
-    end_time_aware = tz.localize(end_dt_obj + timedelta(days=1))
-    start_time_iso = start_time_aware.isoformat()
-    end_time_iso = end_time_aware.isoformat()
-    url = f"https://{shopify_creds['store_url']}/admin/api/{shopify_creds['api_version']}/orders.json"
-    headers = {"X-Shopify-Access-Token": shopify_creds['access_token']}
-    params = {"status": "any", "created_at_min": start_time_iso, "created_at_max": end_time_iso, "limit": 250, "fields": "id,line_items,subtotal_price,total_shipping_price_set,created_at"}
-    try:
-        while url:
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            data = response.json()
-            orders = data.get('orders', [])
-            for order in orders:
-                subtotal = float(order.get('subtotal_price', 0.0))
-                shipping_fee = float(order.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0.0))
-                created_at_utc = datetime.fromisoformat(order['created_at'].replace('Z', '+00:00'))
-                created_at_local = created_at_utc.astimezone(tz)
-                for item in order.get('line_items', []):
-                    item_price = float(item.get('price', 0.0))
-                    item_quantity = int(item.get('quantity', 0))
-                    item_total_value = item_price * item_quantity
-                    shipping_allocation = (shipping_fee * (item_total_value / subtotal)) if subtotal > 0 else 0
-                    item_data = {'Page Title': item['title'], 'Purchases': item_quantity, 'Revenue': item_total_value + shipping_allocation}
-                    if segment == 'By Day':
-                        item_data['Date'] = created_at_local.strftime('%Y-%m-%d')
-                    elif segment == 'By Week':
-                        item_data['Week'] = created_at_local.strftime('%Y-%U')
-                    purchase_data.append(item_data)
-            url = None
-            if 'Link' in response.headers:
-                links = requests.utils.parse_header_links(response.headers['Link'])
-                for link in links:
-                    if link.get('rel') == 'next': url = link.get('url'); params = None; break
-        if not purchase_data: return pd.DataFrame()
-        purchases_df = pd.DataFrame(purchase_data)
-        group_by_cols = ['Page Title']
-        if segment == 'By Day': group_by_cols.append('Date')
-        elif segment == 'By Week': group_by_cols.append('Week')
-        purchase_summary = purchases_df.groupby(group_by_cols).agg({'Purchases': 'sum', 'Revenue': 'sum'}).reset_index()
-        return purchase_summary
-    except Exception as e:
-        st.error(f"Error fetching Shopify historical data: {e}"); return pd.DataFrame()
 
 @st.cache_data
 def fetch_historical_page_report(start_date: str, end_date: str, segment: str):
@@ -230,14 +192,7 @@ def fetch_historical_page_report(start_date: str, end_date: str, segment: str):
         dimensions = [Dimension(name="pageTitle")]
         if segment == 'By Day': dimensions.append(Dimension(name="date"))
         elif segment == 'By Week': dimensions.append(Dimension(name="week"))
-
-        sessions_request = RunReportRequest(
-            property=f"properties/{PROPERTY_ID}",
-            dimensions=dimensions,
-            metrics=[Metric(name="sessions"), Metric(name="totalUsers")],
-            date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
-            limit=50000
-        )
+        sessions_request = RunReportRequest(property=f"properties/{PROPERTY_ID}", dimensions=dimensions, metrics=[Metric(name="sessions"), Metric(name="totalUsers")], date_ranges=[DateRange(start_date=start_date, end_date=end_date)], limit=50000)
         sessions_response = ga_client.run_report(sessions_request)
         ga_sessions_data = []
         for row in sessions_response.rows:
@@ -246,48 +201,16 @@ def fetch_historical_page_report(start_date: str, end_date: str, segment: str):
             elif segment == 'By Week': item_data['Week'] = row.dimension_values[1].value
             ga_sessions_data.append(item_data)
         ga_sessions_df = pd.DataFrame(ga_sessions_data)
-        shopify_purchases_df = fetch_shopify_historical_purchases_by_title(start_date, end_date, segment)
         if ga_sessions_df.empty: return pd.DataFrame()
-
-        ga_processed_df = ga_sessions_df.copy()
-        ga_processed_df[['core_title', 'symbol']] = ga_processed_df['Page Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-        merge_on_cols = ['core_title', 'symbol']
-        if segment == 'By Day': merge_on_cols.append('Date')
-        elif segment == 'By Week': merge_on_cols.append('Week')
-
-        if not shopify_purchases_df.empty:
-            shopify_processed_df = shopify_purchases_df.copy()
-            shopify_processed_df[['core_title', 'symbol']] = shopify_processed_df['Page Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-            shopify_grouped = shopify_processed_df.groupby(merge_on_cols)[['Purchases', 'Revenue']].sum().reset_index()
-            merged_df = pd.merge(ga_processed_df, shopify_grouped, on=merge_on_cols, how='left')
-        else:
-            merged_df = ga_processed_df.copy(); merged_df['Purchases'] = 0; merged_df['Revenue'] = 0.0
-
-        merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
-        merged_df["Revenue"] = merged_df["Revenue"].fillna(0).astype(float)
-        agg_cols = ['core_title', 'symbol']
-        if segment == 'By Day': agg_cols.append('Date')
-        elif segment == 'By Week': agg_cols.append('Week')
-
-        final_grouped_df = merged_df.groupby(agg_cols).agg(**{'Page Title': ('Page Title', 'first'), 'Sessions': ('Sessions', 'sum'), 'Users': ('Users', 'sum'), 'Purchases': ('Purchases', 'first'), 'Revenue': ('Revenue', 'first')}).reset_index()
-        final_grouped_df['Marketer'] = final_grouped_df['Page Title'].apply(get_marketer_from_page_title)
-        final_grouped_df['Session CR'] = np.divide(final_grouped_df['Purchases'], final_grouped_df['Sessions'], out=np.zeros_like(final_grouped_df['Sessions'], dtype=float), where=(final_grouped_df['Sessions']!=0)) * 100
-        final_grouped_df['User CR'] = np.divide(final_grouped_df['Purchases'], final_grouped_df['Users'], out=np.zeros_like(final_grouped_df['Users'], dtype=float), where=(final_grouped_df['Users']!=0)) * 100
-        column_order = ["Page Title", "Marketer", "Sessions", "Users", "Purchases", "Revenue", "Session CR", "User CR"]
-        if segment == 'By Day': column_order.insert(0, 'Date')
-        elif segment == 'By Week': column_order.insert(0, 'Week')
-        all_data_df = final_grouped_df.sort_values(by=["Sessions"], ascending=False)[column_order]
-        if segment != 'Summary': all_data_df = all_data_df.sort_values(by=[column_order[0], "Sessions"], ascending=[True, False])
-        return all_data_df
+        return ga_sessions_df
     except Exception as e:
-        st.error(f"Error fetching Historical Page Report data: {e}"); return pd.DataFrame()
+        st.error(f"Error fetching Historical GA data: {e}"); return pd.DataFrame()
 
 # --- LUỒNG CHÍNH CỦA ỨNG DỤNG ---
 if not cookies.ready(): st.spinner(); st.stop()
 if 'user_info' not in st.session_state:
     st.session_state['user_info'] = get_user_details(cookies.get('username'))
 
-# Khởi tạo bộ nhớ lịch sử cho biểu đồ đường
 if 'realtime_history' not in st.session_state:
     st.session_state.realtime_history = []
 
@@ -311,8 +234,7 @@ else:
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Choose a report:", ("Realtime Dashboard", "Landing Page Report", "Profile"))
     if st.sidebar.button("Log Out"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        for key in list(st.session_state.keys()): del st.session_state[key]
         cookies.clear(); cookies.save(); st.rerun()
     impersonating = False
     if st.session_state['user_info']['role'] == 'admin':
@@ -356,7 +278,7 @@ else:
         try: refresh_interval = int(cookies.get('refresh_interval', 60))
         except (ValueError, TypeError): refresh_interval = 60
         if st.session_state['user_info']['role'] == 'admin' and not impersonating:
-            new_interval = st.sidebar.number_input("Set Refresh Interval (seconds)", min_value=60, value=refresh_interval, step=10)
+            new_interval = st.sidebar.number_input("Set Refresh Interval (seconds)", min_value=30, value=refresh_interval, step=10)
             if new_interval != refresh_interval: cookies['refresh_interval'] = str(new_interval); cookies.save(); st.rerun()
             refresh_interval = new_interval
         
@@ -372,16 +294,24 @@ else:
                 st.markdown(f"*Data fetched at: {localized_fetch_time.strftime('%Y-%m-%d %H:%M:%S')}*")
 
                 top_col1, top_col2, top_col3 = st.columns(3)
-                top_col1.metric("ACTIVE USERS IN LAST 5 MIN", active_users_5min)
-                top_col2.metric("ACTIVE USERS IN LAST 30 MIN", active_users_30min)
-                top_col3.metric("VIEWS IN LAST 30 MIN", total_views)
+                with top_col1:
+                    bg_color, text_color = get_heatmap_color_and_text(active_users_5min, TARGET_USERS_5MIN, COLOR_COLD, COLOR_HOT)
+                    html_5min = f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">ACTIVE USERS (5 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{active_users_5min}</p></div>"""
+                    st.markdown(html_5min, unsafe_allow_html=True)
+                with top_col2:
+                    bg_color, text_color = get_heatmap_color_and_text(active_users_30min, TARGET_USERS_30MIN, COLOR_COLD, COLOR_HOT)
+                    html_30min = f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">ACTIVE USERS (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{active_users_30min}</p></div>"""
+                    st.markdown(html_30min, unsafe_allow_html=True)
+                with top_col3:
+                    bg_color, text_color = get_heatmap_color_and_text(total_views, TARGET_VIEWS_30MIN, COLOR_COLD, COLOR_HOT)
+                    html_views = f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">VIEWS (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{total_views}</p></div>"""
+                    st.markdown(html_views, unsafe_allow_html=True)
+                
                 st.divider()
-
                 bottom_col1, bottom_col2 = st.columns(2)
                 with bottom_col1: st.markdown(f"""<div style="background-color: #025402; border: 2px solid #057805; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">PURCHASES (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23d123; margin: 0;">{purchase_count_30min}</p></div>""", unsafe_allow_html=True)
                 with bottom_col2: st.markdown(f"""<div style="background-color: #013254; border: 2px solid #0564a8; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">CONVERSION RATE (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23a7d1; margin: 0;">{(purchase_count_30min / active_users_30min * 100) if active_users_30min > 0 else 0:.2f}%</p></div>""", unsafe_allow_html=True)
                 
-                # --- BIỂU ĐỒ ĐƯỜNG MỚI ---
                 if not pages_df_full.empty:
                     marketer_summary = pages_df_full.groupby('Marketer')['Active Users'].sum()
                     current_snapshot = marketer_summary.to_dict()
@@ -391,47 +321,38 @@ else:
                 MAX_HISTORY_POINTS = 60
                 if len(st.session_state.realtime_history) > MAX_HISTORY_POINTS:
                     st.session_state.realtime_history = st.session_state.realtime_history[-MAX_HISTORY_POINTS:]
-
                 history_df = pd.DataFrame(st.session_state.realtime_history).set_index('timestamp')
                 history_df_melted = history_df.reset_index().melt(id_vars='timestamp', var_name='Marketer', value_name='Active Users').dropna(subset=['Active Users'])
-                
                 st.divider()
                 st.subheader("Active Users Trend by Marketer (Live)")
                 if not history_df_melted.empty:
-                    fig_trend = px.line(
-                        history_df_melted, x='timestamp', y='Active Users', color='Marketer',
-                        template='plotly_dark', markers=True, labels={'timestamp': 'Time'}
-                    )
+                    fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', markers=True, labels={'timestamp': 'Time'})
                     fig_trend.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), legend_title_text='')
                     st.plotly_chart(fig_trend, use_container_width=True)
                 else:
                     st.write("Collecting data for trend chart... Please wait for the next refresh.")
-                
-                # --- BIỂU ĐỒ CỘT CŨ ---
                 if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
                     st.subheader("Total Active Users per Minute (All Marketers)")
                     fig = px.bar(per_min_df, x="Time", y="Active Users", template="plotly_dark", color_discrete_sequence=['#4A90E2'])
                     fig.update_layout(xaxis_title=None, yaxis_title="Active Users", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), xaxis=dict(tickangle=-90))
                     st.plotly_chart(fig, use_container_width=True)
-                
-                # --- BẢNG DỮ LIỆU ---
                 st.divider()
                 st.subheader("Page and screen in last 30 minutes")
                 pages_to_display = pages_df_full
                 if not (effective_user_info['role'] == 'admin' or effective_user_info.get('can_view_all_realtime_data', False)):
                     marketer_id = effective_user_info['marketer_id']
                     pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
-                
                 if not pages_to_display.empty:
                     st.dataframe(pages_to_display.style.format({'CR': "{:.2f}%", 'Revenue': "${:,.2f}"}).applymap(highlight_metrics, subset=['Purchases', 'Revenue', 'CR']), use_container_width=True)
                 else:
                     st.write("No data available for your user.")
-
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next realtime data refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True); time.sleep(1)
         st.rerun()
 
+
     elif page == "Landing Page Report":
+        #... Full code for Landing Page Report
         st.title("Page Performance Report (by Title)")
         col1, col2 = st.columns(2)
         with col1:
@@ -442,14 +363,12 @@ else:
         min_purchases = 1 if segment_option != 'Summary' else 0
         if segment_option != 'Summary':
             min_purchases = st.number_input("Minimum Purchases to Display", min_value=0, value=1, step=1)
-
         start_date, end_date = None, None
         if selected_option == "Custom Range...":
             today = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).date()
             selected_range = st.date_input("Select your custom date range", value=(today - timedelta(days=6), today), min_value=today - timedelta(days=365), max_value=today, format="YYYY/MM/DD")
             if len(selected_range) == 2: start_date, end_date = selected_range
         else: start_date, end_date = get_date_range(selected_option)
-
         if start_date and end_date:
             st.markdown(f"**Displaying data for:** `{start_date.strftime('%b %d, %Y')}{' - ' + end_date.strftime('%b %d, %Y') if start_date != end_date else ''}`")
             with st.spinner("Fetching data from GA & Shopify..."):
