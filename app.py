@@ -382,7 +382,7 @@ else:
                     st.markdown(f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">VIEWS (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{total_views}</p></div>""", unsafe_allow_html=True)
                 
                 st.divider()
-
+                
                 bottom_col1, bottom_col2 = st.columns(2)
                 with bottom_col1: st.markdown(f"""<div style="background-color: #025402; border: 2px solid #057805; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">PURCHASES (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23d123; margin: 0;">{purchase_count_30min}</p></div>""", unsafe_allow_html=True)
                 with bottom_col2: st.markdown(f"""<div style="background-color: #013254; border: 2px solid #0564a8; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">CONVERSION RATE (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23a7d1; margin: 0;">{(purchase_count_30min / active_users_30min * 100) if active_users_30min > 0 else 0:.2f}%</p></div>""", unsafe_allow_html=True)
@@ -427,15 +427,16 @@ else:
                     marketer_id = effective_user_info['marketer_id']
                     pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
                 if not pages_to_display.empty:
-                    column_config_realtime = {
-                        "Page Title and Screen Class": st.column_config.TextColumn("Page Title", width=400),
-                        "Marketer": st.column_config.TextColumn(width=100),
-                        "Active Users": st.column_config.NumberColumn(width=120),
-                        "Purchases": st.column_config.NumberColumn(width=100),
-                        "Revenue": st.column_config.NumberColumn(format="$%.2f", width=120),
-                        "CR": st.column_config.NumberColumn(format="%.2f%%", width=100)
-                    }
-                    st.dataframe(pages_to_display, use_container_width=True, column_config=column_config_realtime)
+                    st.dataframe(
+                        pages_to_display.style.format({
+                            'CR': "{:.2f}%", 
+                            'Revenue': "${:,.2f}"
+                        }).applymap(
+                            highlight_metrics, 
+                            subset=['Purchases', 'Revenue', 'CR']
+                        ), 
+                        use_container_width=True
+                    )
                 else:
                     st.write("No data available for your user.")
                 if debug_mode:
@@ -488,27 +489,22 @@ else:
                         data_to_display = employee_df
                     if not data_to_display.empty:
                         if segment_option == "Summary":
-                            total_sessions = data_to_display['Sessions'].sum()
-                            total_users = data_to_display['Users'].sum()
-                            total_purchases = data_to_display['Purchases'].sum()
-                            total_revenue = data_to_display['Revenue'].sum()
+                            total_sessions, total_users, total_purchases, total_revenue = data_to_display['Sessions'].sum(), data_to_display['Users'].sum(), data_to_display['Purchases'].sum(), data_to_display['Revenue'].sum()
                             total_session_cr = (total_purchases / total_sessions * 100) if total_sessions > 0 else 0
                             total_user_cr = (total_purchases / total_users * 100) if total_users > 0 else 0
                             total_row = pd.DataFrame([{"Page Title": "Total", "Marketer": "", "Sessions": total_sessions, "Users": total_users, "Purchases": total_purchases, "Revenue": total_revenue, "Session CR": total_session_cr, "User CR": total_user_cr}])
                             data_to_display = pd.concat([total_row, data_to_display], ignore_index=True)
-                        column_config_historical = {
-                            "Date": st.column_config.TextColumn(width=120),
-                            "Week": st.column_config.TextColumn(width=120),
-                            "Page Title": st.column_config.TextColumn(width=350),
-                            "Marketer": st.column_config.TextColumn(width=100),
-                            "Sessions": st.column_config.NumberColumn(width=100),
-                            "Users": st.column_config.NumberColumn(width=100),
-                            "Purchases": st.column_config.NumberColumn(width=100),
-                            "Revenue": st.column_config.NumberColumn(format="$%.2f", width=150),
-                            "Session CR": st.column_config.NumberColumn(format="%.2f%%", width=120),
-                            "User CR": st.column_config.NumberColumn(format="%.2f%%", width=120)
-                        }
-                        st.dataframe(data_to_display.style.format({'Revenue': "${:,.2f}", 'Session CR': "{:.2f}%", 'User CR': "{:.2f}%"}).applymap(highlight_metrics, subset=['Purchases', 'Revenue', 'Session CR', 'User CR']), use_container_width=True, column_config=column_config_historical)
+                        st.dataframe(
+                            data_to_display.style.format({
+                                'Revenue': "${:,.2f}", 
+                                'Session CR': "{:.2f}%", 
+                                'User CR': "{:.2f}%"
+                            }).applymap(
+                                highlight_metrics, 
+                                subset=['Purchases', 'Revenue', 'Session CR', 'User CR']
+                            ), 
+                            use_container_width=True
+                        )
                     else: st.write("No data found for your user/filters in the selected date range.")
                     if debug_mode:
                         st.divider()
