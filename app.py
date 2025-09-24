@@ -357,6 +357,16 @@ else:
                 new_interval = st.number_input("Set Refresh Interval (seconds)", min_value=30, value=refresh_interval, step=10)
                 if new_interval != refresh_interval: cookies['refresh_interval'] = str(new_interval); cookies.save(); st.rerun()
                 refresh_interval = new_interval
+                
+                # --- WIDGET MỚI ĐỂ TÙY CHỈNH KHUNG THỜI GIAN ---
+                time_window_options = [30, 60, 90, 120]
+                current_window = st.session_state.get('time_window', 60)
+                selected_window = st.selectbox("Set Chart Time Window (minutes)", options=time_window_options, index=time_window_options.index(current_window))
+                if selected_window != current_window:
+                    st.session_state.time_window = selected_window
+                    # Xóa lịch sử cũ để biểu đồ bắt đầu lại với khung thời gian mới
+                    st.session_state.realtime_history = []
+                    st.rerun()
         
         selected_tz = pytz.timezone(TIMEZONE_MAPPINGS[selected_tz_name])
         timer_placeholder, placeholder = st.empty(), st.empty()
@@ -392,14 +402,17 @@ else:
                     current_snapshot = marketer_summary.to_dict()
                 else: current_snapshot = {}
                 st.session_state.realtime_history.append({'timestamp': localized_fetch_time, **current_snapshot})
-                MAX_HISTORY_POINTS = 120
+                
+                time_window_minutes = st.session_state.get('time_window', 60)
+                MAX_HISTORY_POINTS = int((time_window_minutes * 60) / refresh_interval)
+
                 if len(st.session_state.realtime_history) > MAX_HISTORY_POINTS:
                     st.session_state.realtime_history = st.session_state.realtime_history[-MAX_HISTORY_POINTS:]
                 history_df = pd.DataFrame(st.session_state.realtime_history).set_index('timestamp')
                 history_df_melted = history_df.reset_index().melt(id_vars='timestamp', var_name='Marketer', value_name='Active Users').dropna(subset=['Active Users'])
                 
                 st.divider()
-                st.subheader("Active Users Trend by Marketer (Live)")
+                st.subheader(f"Active Users Trend by Marketer (Last {time_window_minutes} minutes)")
                 if not history_df_melted.empty:
                     fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', color_discrete_sequence=px.colors.qualitative.Plotly)
                     fig_trend.update_traces(line=dict(width=3))
@@ -431,11 +444,13 @@ else:
                         pages_to_display.style.format({
                             'CR': "{:.2f}%", 
                             'Revenue': "${:,.2f}"
-                        }).applymap(
-                            highlight_metrics, 
-                            subset=['Purchases', 'Revenue', 'CR']
+                        }).apply(
+                            lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'CR'] else [''] * len(x), axis=0
                         ), 
-                        use_container_width=True
+                        use_container_width=True,
+                        column_config={
+                            "Page Title and Screen Class": st.column_config.TextColumn("Page Title", width="large"),
+                        }
                     )
                 else:
                     st.write("No data available for your user.")
@@ -489,7 +504,10 @@ else:
                         data_to_display = employee_df
                     if not data_to_display.empty:
                         if segment_option == "Summary":
-                            total_sessions, total_users, total_purchases, total_revenue = data_to_display['Sessions'].sum(), data_to_display['Users'].sum(), data_to_display['Purchases'].sum(), data_to_display['Revenue'].sum()
+                            total_sessions = data_to_display['Sessions'].sum()
+                            total_users = data_to_display['Users'].sum()
+                            total_purchases = data_to_display['Purchases'].sum()
+                            total_revenue = data_to_display['Revenue'].sum()
                             total_session_cr = (total_purchases / total_sessions * 100) if total_sessions > 0 else 0
                             total_user_cr = (total_purchases / total_users * 100) if total_users > 0 else 0
                             total_row = pd.DataFrame([{"Page Title": "Total", "Marketer": "", "Sessions": total_sessions, "Users": total_users, "Purchases": total_purchases, "Revenue": total_revenue, "Session CR": total_session_cr, "User CR": total_user_cr}])
@@ -499,11 +517,13 @@ else:
                                 'Revenue': "${:,.2f}", 
                                 'Session CR': "{:.2f}%", 
                                 'User CR': "{:.2f}%"
-                            }).applymap(
-                                highlight_metrics, 
-                                subset=['Purchases', 'Revenue', 'Session CR', 'User CR']
+                            }).apply(
+                                lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'Session CR', 'User CR'] else [''] * len(x), axis=0
                             ), 
-                            use_container_width=True
+                            use_container_width=True,
+                            column_config={
+                                "Page Title": st.column_config.TextColumn(width="large"),
+                            }
                         )
                     else: st.write("No data found for your user/filters in the selected date range.")
                     if debug_mode:
