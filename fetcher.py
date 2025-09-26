@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import time
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
@@ -57,21 +56,6 @@ def fetch_ga_data(ga_client, property_id: str):
     response = ga_client.run_realtime_report(request)
     return [{"Page Title and Screen Class": row.dimension_values[0].value, "minutesAgo": int(row.dimension_values[1].value), "Active Users": int(row.metric_values[0].value), "Views": int(row.metric_values[1].value)} for row in response.rows]
 
-def run_fetch_cycle(ga_client, shopify_creds, supabase, page_title_map, SYMBOLS, property_id):
-    """Thực hiện một chu kỳ lấy và cập nhật dữ liệu."""
-    print(f"Executing fetch cycle at {datetime.now(timezone.utc)}")
-    ga_data = fetch_ga_data(ga_client, property_id)
-    shopify_orders = fetch_shopify_data(shopify_creds)
-    
-    final_data_blob = {
-        "ga_data": ga_data,
-        "shopify_orders": shopify_orders,
-        "last_updated_utc": datetime.now(timezone.utc).isoformat()
-    }
-
-    supabase.table("realtime_data").update({"data": final_data_blob}).eq("id", 1).execute()
-    print(f"Successfully updated Supabase at {final_data_blob['last_updated_utc']}")
-
 # ==============================================================================
 # HÀM CHÍNH
 # ==============================================================================
@@ -97,14 +81,18 @@ def main():
             page_title_map = mapping.get('page_title_mapping', {})
             SYMBOLS = sorted(list(page_title_map.keys()), key=len, reverse=True)
         
-        # GitHub Actions chạy mỗi phút, chúng ta sẽ lặp 2 lần với 45 giây ngủ
-        # để tạo ra chu kỳ ~90 giây (2 * 45s = 90s).
-        # Thời gian chạy thực tế của script khoảng 10-15s.
-        for i in range(2):
-            run_fetch_cycle(ga_client, shopify_creds, supabase, page_title_map, SYMBOLS, property_id)
-            if i == 0: # Chỉ ngủ sau lần chạy đầu tiên
-                print("Sleeping for 45 seconds before the next cycle...")
-                time.sleep(45)
+        print(f"Executing fetch cycle at {datetime.now(timezone.utc)}")
+        ga_data = fetch_ga_data(ga_client, property_id)
+        shopify_orders = fetch_shopify_data(shopify_creds)
+        
+        final_data_blob = {
+            "ga_data": ga_data,
+            "shopify_orders": shopify_orders,
+            "last_updated_utc": datetime.now(timezone.utc).isoformat()
+        }
+
+        supabase.table("realtime_data").update({"data": final_data_blob}).eq("id", 1).execute()
+        print(f"Successfully updated Supabase at {final_data_blob['last_updated_utc']}")
 
     except Exception as e:
         print(f"An error occurred: {e}")
