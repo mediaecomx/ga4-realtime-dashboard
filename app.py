@@ -21,8 +21,6 @@ from urllib.parse import urlparse
 
 # --- CẤU HÌNH CHUNG ---
 PROPERTY_ID = "501726461"
-HOURLY_TOKEN_QUOTA = 5000
-DAILY_TOKEN_QUOTA = 25000
 
 # --- BẮT ĐẦU CẤU HÌNH CHO THẺ NHIỆT ---
 TARGET_USERS_5MIN = 50
@@ -105,7 +103,15 @@ def extract_core_and_symbol(title: str, symbols: list):
     return cleaned_text, found_symbol
     
 def highlight_metrics(val):
+    should_highlight = False
+    # Điều kiện cho các cột số
     if isinstance(val, (int, float)) and val > 0:
+        should_highlight = True
+    # Điều kiện cho cột thời gian (kiểu chuỗi)
+    elif isinstance(val, str) and val != "—":
+        should_highlight = True
+    
+    if should_highlight:
         return 'background-color: #023020; color: #23d123; font-weight: bold;'
     return ''
 
@@ -115,27 +121,6 @@ def get_marketer_from_page_title(title: str) -> str:
             return page_title_map[symbol]
     return ""
 
-def render_progress_bar(value, total):
-    if not isinstance(value, int) or total == 0:
-        percentage = 0
-    else:
-        percentage = min(100, (value / total) * 100)
-    
-    if percentage >= 90:
-        color = "#FF4B4B"  # Đỏ
-    elif percentage >= 75:
-        color = "#FFC732"  # Vàng
-    else:
-        color = "#00B084"  # Xanh
-    
-    st.markdown(f"""
-        <style>
-            .stProgress > div > div > div > div {{
-                background-color: {color};
-            }}
-        </style>""", unsafe_allow_html=True)
-    st.progress(percentage / 100)
-
 # --- CÁC HÀM LẤY DỮ LIỆU ---
 @st.cache_data(ttl=30)
 def fetch_shopify_realtime_purchases_rest():
@@ -143,7 +128,8 @@ def fetch_shopify_realtime_purchases_rest():
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
         url = f"https://{shopify_creds['store_url']}/admin/api/{shopify_creds['api_version']}/orders.json"
         headers = {"X-Shopify-Access-Token": shopify_creds['access_token']}
-        params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "line_items,total_shipping_price_set,subtotal_price"}
+        # THÊM `created_at` VÀO TRƯỜNG LẤY DỮ LIỆU
+        params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "line_items,total_shipping_price_set,subtotal_price,created_at"}
         response = requests.get(url, headers=headers, params=params, timeout=10)
         response.raise_for_status()
         orders = response.json().get('orders', [])
@@ -151,77 +137,69 @@ def fetch_shopify_realtime_purchases_rest():
         for order in orders:
             subtotal = float(order.get('subtotal_price', 0.0))
             shipping_fee = float(order.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0.0))
+            order_created_at = order['created_at'] # LẤY THỜI GIAN TẠO ĐƠN HÀNG
             for item in order.get('line_items', []):
                 item_price = float(item['price'])
                 item_quantity = item['quantity']
                 item_total_value = item_price * item_quantity
                 shipping_allocation = (shipping_fee * (item_total_value / subtotal)) if subtotal > 0 else 0
-                purchase_data.append({'Product Title': item['title'], 'Purchases': item_quantity, 'Revenue': item_total_value + shipping_allocation})
-        if not purchase_data: return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue"]), 0
+                # THÊM `created_at` VÀO DỮ LIỆU
+                purchase_data.append({'Product Title': item['title'], 'Purchases': item_quantity, 'Revenue': item_total_value + shipping_allocation, 'created_at': order_created_at})
+        if not purchase_data: 
+            # CẬP NHẬT CỘT KHI KHÔNG CÓ DỮ LIỆU
+            return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0
         df = pd.DataFrame(purchase_data)
         return df, df['Purchases'].sum()
-    except Exception: return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue"]), 0
+    except Exception: 
+        return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0
 
 @st.cache_data(ttl=30)
 def fetch_realtime_data():
     try:
-        request = RunRealtimeReportRequest(
-            property=f"properties/{PROPERTY_ID}",
-            dimensions=[Dimension(name="unifiedScreenName"), Dimension(name="minutesAgo")],
-            metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")],
-            minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)],
-            return_property_quota=True
-        )
-        response = ga_client.run_realtime_report(request)
-        
-        pq = getattr(response, "property_quota", None)
-        quota_details = {
-            "tokens_per_hour": {"consumed": pq.tokens_per_hour.consumed if pq and pq.tokens_per_hour else 0, "remaining": pq.tokens_per_hour.remaining if pq and pq.tokens_per_hour else "N/A"},
-            "tokens_per_day": {"consumed": pq.tokens_per_day.consumed if pq and pq.tokens_per_day else 0, "remaining": pq.tokens_per_day.remaining if pq and pq.tokens_per_day else "N/A"}
-        }
-        
-        all_data = [{"Page Title and Screen Class": row.dimension_values[0].value, "minutesAgo": int(row.dimension_values[1].value), "Active Users": int(row.metric_values[0].value), "Views": int(row.metric_values[1].value)} for row in response.rows]
-        
-        if not all_data:
-            now_in_utc = datetime.now(pytz.utc)
-            empty_df = pd.DataFrame()
-            return 0, 0, 0, 0, empty_df, empty_df, now_in_utc, empty_df, empty_df, empty_df, empty_df, empty_df, quota_details
-            
-        full_df = pd.DataFrame(all_data)
-        active_users_30min = full_df.groupby('Page Title and Screen Class')['Active Users'].first().sum()
-        active_users_5min = full_df[full_df['minutesAgo'] <= 4].groupby('Page Title and Screen Class')['Active Users'].first().sum()
-        total_views = full_df['Views'].sum()
-        
-        per_min_summary = full_df.groupby('minutesAgo')['Active Users'].sum()
-        per_min_data = {str(i): per_min_summary.get(i, 0) for i in range(30)}
+        kpi_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", metrics=[Metric(name="activeUsers")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0), MinuteRange(start_minutes_ago=4, end_minutes_ago=0)])
+        pages_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", dimensions=[Dimension(name="unifiedScreenName")], metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)])
+        per_min_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", dimensions=[Dimension(name="minutesAgo")], metrics=[Metric(name="activeUsers")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)])
+        kpi_response, pages_response, per_min_response = ga_client.run_realtime_report(kpi_request), ga_client.run_realtime_report(pages_request), ga_client.run_realtime_report(per_min_request)
+        active_users_30min, active_users_5min = (int(kpi_response.rows[0].metric_values[0].value) if kpi_response.rows else 0), (int(kpi_response.rows[1].metric_values[0].value) if len(kpi_response.rows) > 1 else 0)
+        pages_data, total_views = [], 0
+        for row in pages_response.rows:
+            pages_data.append({"Page Title and Screen Class": row.dimension_values[0].value, "Active Users": int(row.metric_values[0].value)})
+            total_views += int(row.metric_values[1].value) if len(row.metric_values) > 1 else 0
+        ga_pages_df = pd.DataFrame(pages_data)
+        per_min_data = {str(i): 0 for i in range(30)}
+        for row in per_min_response.rows: per_min_data[row.dimension_values[0].value] = int(row.metric_values[0].value)
         per_min_df = pd.DataFrame([{"Time": f"-{int(k)} min", "Active Users": v} for k, v in sorted(per_min_data.items(), key=lambda item: int(item[0]))])
-
-        ga_pages_df = full_df.groupby("Page Title and Screen Class").agg(ActiveUsers=('Active Users', 'sum')).reset_index()
-        
         shopify_purchases_df, purchase_count_30min = fetch_shopify_realtime_purchases_rest()
-        
         ga_pages_df_processed = ga_pages_df.copy()
         shopify_purchases_df_processed = shopify_purchases_df.copy()
         if not ga_pages_df_processed.empty:
             ga_pages_df_processed[['core_title', 'symbol']] = ga_pages_df_processed['Page Title and Screen Class'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
             if not shopify_purchases_df_processed.empty:
                 shopify_purchases_df_processed[['core_title', 'symbol']] = shopify_purchases_df_processed['Product Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index()
+                # KHI NHÓM DỮ LIỆU, TÍNH TỔNG Purchases, Revenue VÀ LẤY THỜI GIAN LỚN NHẤT (max)
+                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(
+                    Purchases=('Purchases', 'sum'),
+                    Revenue=('Revenue', 'sum'),
+                    LastPurchaseTime=('created_at', 'max')
+                ).reset_index()
                 merged_df = pd.merge(ga_pages_df_processed, shopify_grouped, on=['core_title', 'symbol'], how='left')
             else:
-                merged_df = ga_pages_df_processed.copy(); merged_df['Purchases'] = 0; merged_df['Revenue'] = 0.0
+                merged_df = ga_pages_df_processed.copy()
+                merged_df['Purchases'] = 0
+                merged_df['Revenue'] = 0.0
+                merged_df['LastPurchaseTime'] = pd.NaT # Thêm cột trống nếu không có đơn hàng nào
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
             merged_df["Revenue"] = merged_df["Revenue"].fillna(0).astype(float)
-            merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["ActiveUsers"], out=np.zeros_like(merged_df["ActiveUsers"], dtype=float), where=(merged_df["ActiveUsers"]!=0)) * 100
+            merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
-            final_pages_df = merged_df.sort_values(by="ActiveUsers", ascending=False).rename(columns={"ActiveUsers": "Active Users"})[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR"]]
+            # THÊM CỘT `LastPurchaseTime` VÀO DATAFRAME CUỐI CÙNG
+            final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR", "LastPurchaseTime"]]
         else:
             final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
-            
         now_in_utc = datetime.now(pytz.utc)
-        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df, quota_details
+        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df
     except Exception as e:
-        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
@@ -396,20 +374,20 @@ else:
         st.title("🚀 Realtime Dashboard")
         with st.sidebar:
             selected_tz_name = st.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
-            try: refresh_interval = int(cookies.get('refresh_interval', 75))
-            except (ValueError, TypeError): refresh_interval = 75
+            try: refresh_interval = int(cookies.get('refresh_interval', 30))
+            except (ValueError, TypeError): refresh_interval = 30
             if st.session_state['user_info']['role'] == 'admin' and not impersonating:
-                new_interval = st.number_input("Set Refresh Interval (seconds)", min_value=30, value=refresh_interval, step=15)
+                new_interval = st.number_input("Set Refresh Interval (seconds)", min_value=30, value=refresh_interval, step=10)
                 if new_interval != refresh_interval: cookies['refresh_interval'] = str(new_interval); cookies.save(); st.rerun()
                 refresh_interval = new_interval
                 
+                # --- WIDGET MỚI ĐỂ TÙY CHỈNH KHUNG THỜI GIAN ---
                 time_window_options = [30, 60, 90, 120]
                 current_window = st.session_state.get('time_window', 60)
-                try: default_index = time_window_options.index(current_window)
-                except ValueError: default_index = 1
-                selected_window = st.selectbox("Set Chart Time Window (minutes)", options=time_window_options, index=default_index)
+                selected_window = st.selectbox("Set Chart Time Window (minutes)", options=time_window_options, index=time_window_options.index(current_window))
                 if selected_window != current_window:
                     st.session_state.time_window = selected_window
+                    # Xóa lịch sử cũ để biểu đồ bắt đầu lại với khung thời gian mới
                     st.session_state.realtime_history = []
                     st.rerun()
         
@@ -421,8 +399,7 @@ else:
             if fetch_result[0] is None:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df, quota_details) = fetch_result
-                
+                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df) = fetch_result
                 localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
                 st.markdown(f"*Last update: {localized_fetch_time.strftime('%Y-%m-%d %H:%M:%S')}*")
 
@@ -462,7 +439,12 @@ else:
                 if not history_df_melted.empty:
                     fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', color_discrete_sequence=px.colors.qualitative.Plotly)
                     fig_trend.update_traces(line=dict(width=3))
-                    fig_trend.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), legend_title_text='', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), hovermode="x unified")
+                    fig_trend.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                        yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), legend_title_text='',
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        hovermode="x unified"
+                    )
                     st.plotly_chart(fig_trend, use_container_width=True)
                 else:
                     st.write("Collecting data for trend chart... Please wait for the next refresh.")
@@ -480,30 +462,36 @@ else:
                 if not can_view_all:
                     marketer_id = effective_user_info['marketer_id']
                     pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
+                
                 if not pages_to_display.empty:
-                    st.dataframe(pages_to_display.style.format({'CR': "{:.2f}%", 'Revenue': "${:,.2f}"}).apply(lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'CR'] else [''] * len(x), axis=0), use_container_width=True, column_config={"Page Title and Screen Class": st.column_config.TextColumn("Page Title", width="large")})
+                    pages_to_display = pages_to_display.copy()
+                    if 'LastPurchaseTime' in pages_to_display.columns:
+                        pages_to_display['LastPurchaseTime'] = pd.to_datetime(pages_to_display['LastPurchaseTime'], errors='coerce')
+                        pages_to_display['Last Purchase Time'] = pages_to_display['LastPurchaseTime'].dt.tz_convert(selected_tz).dt.strftime('%H:%M:%S')
+                        pages_to_display['Last Purchase Time'] = pages_to_display['Last Purchase Time'].fillna("—")
+                        
+                        final_columns_order = [
+                            "Page Title and Screen Class", "Marketer", "Active Users", 
+                            "Purchases", "Last Purchase Time", "Revenue", "CR"
+                        ]
+                        pages_to_display = pages_to_display[final_columns_order]
+
+                    st.dataframe(
+                        pages_to_display.style.format({
+                            'CR': "{:.2f}%", 
+                            'Revenue': "${:,.2f}"
+                        }).apply(
+                            # THÊM `Last Purchase Time` VÀO DANH SÁCH CỘT CẦN LÀM NỔI BẬT
+                            lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'CR', 'Last Purchase Time'] else [''] * len(x), axis=0
+                        ), 
+                        use_container_width=True,
+                        column_config={
+                            "Page Title and Screen Class": st.column_config.TextColumn("Page Title", width="large"),
+                            "Last Purchase Time": st.column_config.TextColumn("Last Purchase", width="small"),
+                        }
+                    )
                 else:
                     st.write("No data available for your user.")
-                
-                if st.session_state['user_info']['role'] == 'admin' and not impersonating:
-                    st.divider()
-                    st.subheader("📊 API Quota Monitoring")
-                    
-                    tokens_day_consumed = quota_details["tokens_per_day"]["consumed"]
-                    tokens_day_remaining = quota_details["tokens_per_day"]["remaining"]
-                    tokens_hour_consumed = quota_details["tokens_per_hour"]["consumed"]
-                    tokens_hour_remaining = quota_details["tokens_per_hour"]["remaining"]
-
-                    q_col1, q_col2 = st.columns(2)
-                    with q_col1:
-                        st.metric("Hourly Tokens", f"{tokens_hour_consumed} / {HOURLY_TOKEN_QUOTA}")
-                        st.caption(f"Used in the current hour. Remaining: {tokens_hour_remaining}")
-                        render_progress_bar(tokens_hour_consumed, HOURLY_TOKEN_QUOTA)
-                    with q_col2:
-                        st.metric("Daily Tokens", f"{tokens_day_consumed} / {DAILY_TOKEN_QUOTA}")
-                        st.caption(f"Total used today. Resets daily at 14:00 (VN Time). Remaining: {tokens_day_remaining}")
-                        render_progress_bar(tokens_day_consumed, DAILY_TOKEN_QUOTA)
-
                 if debug_mode:
                     st.divider(); st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
                     with st.expander("1. Raw Data from APIs"):
@@ -512,12 +500,10 @@ else:
                     with st.expander("2. Processed Data (before merge)"):
                         st.write("GA Processed:"); st.dataframe(ga_processed_df); st.code(ga_processed_df.to_json(orient='records', indent=2))
                         st.write("Shopify Processed & Grouped:"); 
-                        shopify_grouped_debug = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index()
+                        shopify_grouped_debug = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(Purchases=('Purchases', 'sum'), Revenue=('Revenue', 'sum'), LastPurchaseTime=('created_at', 'max')).reset_index()
                         st.dataframe(shopify_grouped_debug); st.code(shopify_grouped_debug.to_json(orient='records', indent=2))
                     with st.expander("3. Merged Data"):
                         st.dataframe(merged_final_df); st.code(merged_final_df.to_json(orient='records', indent=2))
-                    with st.expander("4. API Quota Details (from this request)"):
-                        st.json(quota_details)
 
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True); time.sleep(1)
@@ -556,15 +542,26 @@ else:
                         data_to_display = employee_df
                     if not data_to_display.empty:
                         if segment_option == "Summary":
-                            total_sessions, total_users, total_purchases, total_revenue = data_to_display['Sessions'].sum(), data_to_display['Users'].sum(), data_to_display['Purchases'].sum(), data_to_display['Revenue'].sum()
+                            total_sessions = data_to_display['Sessions'].sum()
+                            total_users = data_to_display['Users'].sum()
+                            total_purchases = data_to_display['Purchases'].sum()
+                            total_revenue = data_to_display['Revenue'].sum()
                             total_session_cr = (total_purchases / total_sessions * 100) if total_sessions > 0 else 0
                             total_user_cr = (total_purchases / total_users * 100) if total_users > 0 else 0
                             total_row = pd.DataFrame([{"Page Title": "Total", "Marketer": "", "Sessions": total_sessions, "Users": total_users, "Purchases": total_purchases, "Revenue": total_revenue, "Session CR": total_session_cr, "User CR": total_user_cr}])
                             data_to_display = pd.concat([total_row, data_to_display], ignore_index=True)
                         st.dataframe(
-                            data_to_display.style.format({'Revenue': "${:,.2f}", 'Session CR': "{:.2f}%", 'User CR': "{:.2f}%"}).apply(lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'Session CR', 'User CR'] else [''] * len(x), axis=0), 
+                            data_to_display.style.format({
+                                'Revenue': "${:,.2f}", 
+                                'Session CR': "{:.2f}%", 
+                                'User CR': "{:.2f}%"
+                            }).apply(
+                                lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'Session CR', 'User CR'] else [''] * len(x), axis=0
+                            ), 
                             use_container_width=True,
-                            column_config={"Page Title": st.column_config.TextColumn(width="large")}
+                            column_config={
+                                "Page Title": st.column_config.TextColumn(width="large"),
+                            }
                         )
                     else: st.write("No data found for your user/filters in the selected date range.")
                     if debug_mode:
