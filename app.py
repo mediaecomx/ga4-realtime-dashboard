@@ -43,10 +43,8 @@ except FileNotFoundError:
 except (json.JSONDecodeError, KeyError):
     st.error("Error: marketer_mapping.json is not structured correctly."); st.stop()
 
-# CREATE REVERSE MAP: FROM MARKETER ID TO SYMBOL
 marketer_to_symbol_map = {}
 for symbol, marketer_id in page_title_map.items():
-    # Only take emoji symbols (not 'MKT1') and ensure one symbol per marketer
     if marketer_id not in marketer_to_symbol_map and not symbol.startswith("MKT"):
         marketer_to_symbol_map[marketer_id] = symbol
 
@@ -125,7 +123,6 @@ def get_marketer_from_page_title(title: str) -> str:
             return page_title_map[symbol]
     return ""
 
-# SỬA LỖI: Bỏ @st.cache_data để đảm bảo dữ liệu luôn mới nhất
 def fetch_shopify_realtime_purchases_rest():
     try:
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -173,25 +170,47 @@ def fetch_shopify_realtime_purchases_rest():
     except Exception: 
         return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0, []
 
-# SỬA LỖI: Bỏ @st.cache_data để đảm bảo hàm này luôn được chạy lại
 def fetch_realtime_data():
     try:
-        kpi_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", metrics=[Metric(name="activeUsers")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0), MinuteRange(start_minutes_ago=4, end_minutes_ago=0)])
-        pages_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", dimensions=[Dimension(name="unifiedScreenName")], metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)])
-        per_min_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", dimensions=[Dimension(name="minutesAgo")], metrics=[Metric(name="activeUsers")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)])
-        kpi_response, pages_response, per_min_response = ga_client.run_realtime_report(kpi_request), ga_client.run_realtime_report(pages_request), ga_client.run_realtime_report(per_min_request)
-        active_users_30min, active_users_5min = (int(kpi_response.rows[0].metric_values[0].value) if kpi_response.rows else 0), (int(kpi_response.rows[1].metric_values[0].value) if len(kpi_response.rows) > 1 else 0)
-        pages_data, total_views = [], 0
-        for row in pages_response.rows:
-            pages_data.append({"Page Title and Screen Class": row.dimension_values[0].value, "Active Users": int(row.metric_values[0].value)})
-            total_views += int(row.metric_values[1].value) if len(row.metric_values) > 1 else 0
-        ga_pages_df = pd.DataFrame(pages_data)
+        # TỐI ƯU HÓA: Gộp 3 lệnh gọi API thành 1 lệnh gọi duy nhất
+        request = RunRealtimeReportRequest(
+            property=f"properties/{PROPERTY_ID}",
+            dimensions=[Dimension(name="unifiedScreenName"), Dimension(name="minutesAgo")],
+            metrics=[Metric(name="activeUsers"), Metric(name="screenPageViews")],
+            minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0)],
+            return_property_quota=True
+        )
+        response = ga_client.run_realtime_report(request)
         
-        ga_raw_df = ga_pages_df.copy()
+        # Xử lý quota details từ response duy nhất
+        pq = getattr(response, "property_quota", None)
+        quota_details = {
+            "tokens_per_hour": {"consumed": pq.tokens_per_hour.consumed if pq and pq.tokens_per_hour else 0, "remaining": pq.tokens_per_hour.remaining if pq and pq.tokens_per_hour else "N/A"},
+            "tokens_per_day": {"consumed": pq.tokens_per_day.consumed if pq and pq.tokens_per_day else 0, "remaining": pq.tokens_per_day.remaining if pq and pq.tokens_per_day else "N/A"}
+        }
+        
+        all_data = [{"Page Title and Screen Class": row.dimension_values[0].value, "minutesAgo": int(row.dimension_values[1].value), "Active Users": int(row.metric_values[0].value), "Views": int(row.metric_values[1].value)} for row in response.rows]
+        
+        if not all_data:
+            now_in_utc = datetime.now(pytz.utc)
+            empty_df = pd.DataFrame()
+            # Lấy dữ liệu Shopify ngay cả khi không có traffic
+            shopify_raw_df, purchase_count_30min, order_details = fetch_shopify_realtime_purchases_rest()
+            return 0, 0, 0, purchase_count_30min, empty_df, empty_df, now_in_utc, empty_df, shopify_raw_df, empty_df, empty_df, empty_df, [], order_details, quota_details
 
-        per_min_data = {str(i): 0 for i in range(30)}
-        for row in per_min_response.rows: per_min_data[row.dimension_values[0].value] = int(row.metric_values[0].value)
+        full_df = pd.DataFrame(all_data)
+        ga_raw_df = full_df.copy()
+        
+        # Tái tạo lại các chỉ số KPI từ 1 response duy nhất
+        active_users_30min = full_df.groupby('Page Title and Screen Class')['Active Users'].first().sum()
+        active_users_5min = full_df[full_df['minutesAgo'] <= 4].groupby('Page Title and Screen Class')['Active Users'].first().sum()
+        total_views = full_df['Views'].sum()
+        
+        per_min_summary = full_df.groupby('minutesAgo')['Active Users'].sum()
+        per_min_data = {str(i): per_min_summary.get(i, 0) for i in range(30)}
         per_min_df = pd.DataFrame([{"Time": f"-{int(k)} min", "Active Users": v} for k, v in sorted(per_min_data.items(), key=lambda item: int(item[0]))])
+
+        ga_pages_df = full_df.groupby("Page Title and Screen Class").agg(ActiveUsers=('Active Users', 'first')).reset_index()
         
         shopify_raw_df, purchase_count_30min, order_details = fetch_shopify_realtime_purchases_rest()
         
@@ -202,20 +221,10 @@ def fetch_realtime_data():
                 marketer = get_marketer_from_page_title(title)
                 timestamp = pd.to_datetime(purchase['created_at'], utc=True)
                 quantity = purchase['Purchases']
-                
-                product_symbol = None
-                for name_part, symbol in product_symbol_map.items():
-                    if name_part in title:
-                        product_symbol = symbol
-                        break
-                
+                product_symbol = next((symbol for name_part, symbol in product_symbol_map.items() if name_part in title), None)
                 if marketer and product_symbol:
                     for _ in range(quantity):
-                        purchase_events.append({
-                            'timestamp': timestamp,
-                            'Marketer': marketer,
-                            'symbol': f"{product_symbol}{marketer}"
-                        })
+                        purchase_events.append({'timestamp': timestamp, 'Marketer': marketer, 'symbol': f"{product_symbol}{marketer}"})
 
         ga_pages_df_processed = ga_pages_df.copy()
         shopify_purchases_df_processed = shopify_raw_df.copy()
@@ -223,24 +232,23 @@ def fetch_realtime_data():
             ga_pages_df_processed[['core_title', 'symbol']] = ga_pages_df_processed['Page Title and Screen Class'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
             if not shopify_purchases_df_processed.empty:
                 shopify_purchases_df_processed[['core_title', 'symbol']] = shopify_purchases_df_processed['Product Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(
-                    Purchases=('Purchases', 'sum'), Revenue=('Revenue', 'sum'), LastPurchaseTime=('created_at', 'max')
-                ).reset_index()
+                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index()
                 merged_df = pd.merge(ga_pages_df_processed, shopify_grouped, on=['core_title', 'symbol'], how='left')
             else:
-                merged_df = ga_pages_df_processed.copy()
-                merged_df['Purchases'] = 0; merged_df['Revenue'] = 0.0; merged_df['LastPurchaseTime'] = pd.NaT
+                merged_df = ga_pages_df_processed.copy(); merged_df['Purchases'] = 0; merged_df['Revenue'] = 0.0
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
             merged_df["Revenue"] = merged_df["Revenue"].fillna(0).astype(float)
-            merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
+            merged_df.rename(columns={"ActiveUsers": "Active Users"}, inplace=True)
+            merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"] != 0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
             final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR", "LastPurchaseTime"]]
         else:
             final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
+            
         now_in_utc = datetime.now(pytz.utc)
-        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_raw_df, shopify_raw_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df, purchase_events, order_details
+        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_raw_df, shopify_raw_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df, purchase_events, order_details, quota_details
     except Exception as e:
-        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], []
+        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], [], {}
 
 @st.cache_data
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
@@ -521,7 +529,7 @@ else:
             if fetch_result[0] is None:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_purchases_df_processed, merged_df, purchase_events, order_details) = fetch_result
+                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_purchases_df_processed, merged_df, purchase_events, order_details, quota_details) = fetch_result
                 
                 if 'mock_orders' in st.session_state:
                     mock_data_list = st.session_state.get('mock_orders', [])
