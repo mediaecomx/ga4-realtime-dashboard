@@ -6,7 +6,7 @@ class NotificationManager:
     """
     Manages tracking and setting session state flags for new order notifications.
     It detects new sales and sets flags that the main script can use to display
-    persistent visual feedback like banners and firework effects.
+    persistent visual feedback like banners and a generic rain effect.
     """
     def __init__(self, session_state_key="last_seen_order_ids"):
         """
@@ -29,7 +29,7 @@ class NotificationManager:
 
     def check_for_new_sales(self, order_details: list):
         """
-        Checks for new sales by comparing order IDs and sets session state flags to trigger UI effects.
+        Checks for new sales and sets session state flags to trigger UI effects.
         
         Args:
             order_details (list): A list of dictionary objects, where each object represents
@@ -47,7 +47,6 @@ class NotificationManager:
         if new_order_ids:
             new_sales_messages = []
             for new_id in new_order_ids:
-                # Find the full details of the new order
                 order = next((o for o in order_details if o['id'] == new_id), None)
                 if order:
                     products_str = ", ".join(order['products'])
@@ -60,11 +59,8 @@ class NotificationManager:
                     new_sales_messages.append(message)
             
             if new_sales_messages:
-                # Set flags for the main script to handle UI
-                # Combine multiple new sales into one banner for clarity
                 st.session_state.banner_notification = " \n\n ".join(new_sales_messages)
                 st.session_state.show_celebration = True
                 st.session_state.celebration_start_time = time.time()
 
-        # Update the state with all current IDs for the next check
         self._update_order_ids(current_ids)
