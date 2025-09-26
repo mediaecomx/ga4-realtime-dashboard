@@ -43,6 +43,13 @@ except FileNotFoundError:
 except (json.JSONDecodeError, KeyError):
     st.error("Error: marketer_mapping.json is not structured correctly."); st.stop()
 
+# CREATE REVERSE MAP: FROM MARKETER ID TO SYMBOL
+marketer_to_symbol_map = {}
+for symbol, marketer_id in page_title_map.items():
+    # Only take emoji symbols (not 'MKT1') and ensure one symbol per marketer
+    if marketer_id not in marketer_to_symbol_map and not symbol.startswith("MKT"):
+        marketer_to_symbol_map[marketer_id] = symbol
+
 TIMEZONE_MAPPINGS = {"Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh", "New York (UTC-4)": "America/New_York", "Chicago (UTC-5)": "America/Chicago", "Denver (UTC-6)": "America/Denver", "Los Angeles (UTC-7)": "America/Los_Angeles", "Anchorage (UTC-8)": "America/Anchorage", "Honolulu (UTC-10)": "Pacific/Honolulu"}
 SYMBOLS = sorted(list(page_title_map.keys()), key=len, reverse=True)
 
@@ -118,7 +125,7 @@ def get_marketer_from_page_title(title: str) -> str:
             return page_title_map[symbol]
     return ""
 
-@st.cache_data(ttl=30)
+# SỬA LỖI: Bỏ @st.cache_data để đảm bảo dữ liệu luôn mới nhất
 def fetch_shopify_realtime_purchases_rest():
     try:
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -166,7 +173,7 @@ def fetch_shopify_realtime_purchases_rest():
     except Exception: 
         return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0, []
 
-@st.cache_data(ttl=30)
+# SỬA LỖI: Bỏ @st.cache_data để đảm bảo hàm này luôn được chạy lại
 def fetch_realtime_data():
     try:
         kpi_request = RunRealtimeReportRequest(property=f"properties/{PROPERTY_ID}", metrics=[Metric(name="activeUsers")], minute_ranges=[MinuteRange(start_minutes_ago=29, end_minutes_ago=0), MinuteRange(start_minutes_ago=4, end_minutes_ago=0)])
@@ -364,7 +371,6 @@ else:
     effective_user_info = dict(st.session_state['user_info'])
     avatar_url = effective_user_info.get("avatar_url") or default_avatar_url
     
-    # Đọc các cài đặt từ cookies
     try:
         rain_duration = int(cookies.get('rain_duration', 30))
     except (ValueError, TypeError):
@@ -421,7 +427,7 @@ else:
                     options=marketer_list,
                     default=marketer_list[0] if marketer_list else None
                 )
-
+                
                 st.subheader("Rain Effect Settings")
                 new_rain_enabled = st.checkbox("Enable Rain Effect", value=rain_enabled)
                 if new_rain_enabled != rain_enabled:
