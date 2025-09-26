@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go # Thêm thư viện này
+import plotly.graph_objects as go 
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     RunRealtimeReportRequest, RunReportRequest, Dimension, Metric, MinuteRange,
@@ -19,35 +19,32 @@ import requests
 import base64
 from supabase import create_client, Client
 from urllib.parse import urlparse
+import random
 
-# --- CẤU HÌNH CHUNG ---
+from notification_manager import NotificationManager
+
 PROPERTY_ID = "501726461"
 
-# --- BẮT ĐẦU CẤU HÌNH CHO THẺ NHIỆT ---
 TARGET_USERS_5MIN = 50
 TARGET_USERS_30MIN = 200
 TARGET_VIEWS_30MIN = 1000
 COLOR_COLD = (40, 40, 60)
 COLOR_HOT = (255, 190, 0)
-# --- KẾT THÚC CẤU HÌNH CHO THẺ NHIỆT ---
 
-# --- TẢI CÁC QUY TẮC MAPPING TỪ FILE JSON ---
 try:
     with open('marketer_mapping.json', 'r', encoding='utf-8') as f:
         full_mapping = json.load(f)
         page_title_map = full_mapping.get('page_title_mapping', {})
         landing_page_map = full_mapping.get('landing_page_mapping', {})
-        # TẢI THÊM MAPPING SẢN PHẨM -> BIỂU TƯỢNG
         product_symbol_map = full_mapping.get('product_to_symbol_mapping', {})
 except FileNotFoundError:
-    st.error("Lỗi: Không tìm thấy file marketer_mapping.json."); st.stop()
+    st.error("Error: marketer_mapping.json not found."); st.stop()
 except (json.JSONDecodeError, KeyError):
-    st.error("Lỗi: File marketer_mapping.json có cấu trúc không hợp lệ."); st.stop()
+    st.error("Error: marketer_mapping.json is not structured correctly."); st.stop()
 
 TIMEZONE_MAPPINGS = {"Viet Nam (UTC+7)": "Asia/Ho_Chi_Minh", "New York (UTC-4)": "America/New_York", "Chicago (UTC-5)": "America/Chicago", "Denver (UTC-6)": "America/Denver", "Los Angeles (UTC-7)": "America/Los_Angeles", "Anchorage (UTC-8)": "America/Anchorage", "Honolulu (UTC-10)": "Pacific/Honolulu"}
 SYMBOLS = sorted(list(page_title_map.keys()), key=len, reverse=True)
 
-# --- KẾT NỐI VÀ XÁC THỰC ---
 cookies = EncryptedCookieManager(password=st.secrets["cookie"]["encrypt_key"])
 
 def get_user_details(username: str):
@@ -74,13 +71,11 @@ try:
     supabase_key = st.secrets["supabase"]["service_role_key"]
     supabase: Client = create_client(supabase_url, supabase_key)
 except Exception as e:
-    st.error(f"Lỗi khi khởi tạo Client hoặc đọc secrets: {e}"); st.stop()
+    st.error(f"Error initializing clients or reading secrets: {e}"); st.stop()
 
-# --- GIAO DIỆN CHUNG ---
 st.set_page_config(layout="wide")
 st.markdown("""<style>.stApp{background-color:black;color:white;}.stMetric{color:white;}.stDataFrame{color:white;}.stPlotlyChart{background-color:transparent;}.block-container{padding-top: 2rem; padding-bottom: 2rem; padding-left: 5rem; padding-right: 5rem;}</style>""", unsafe_allow_html=True)
 
-# --- CÁC HÀM TIỆN ÍCH ---
 def get_heatmap_color_and_text(value, target, cold_color, hot_color):
     if target == 0: bg_rgb = cold_color
     else:
@@ -122,34 +117,53 @@ def get_marketer_from_page_title(title: str) -> str:
             return page_title_map[symbol]
     return ""
 
-# --- CÁC HÀM LẤY DỮ LIỆU ---
 @st.cache_data(ttl=30)
 def fetch_shopify_realtime_purchases_rest():
     try:
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
         url = f"https://{shopify_creds['store_url']}/admin/api/{shopify_creds['api_version']}/orders.json"
         headers = {"X-Shopify-Access-Token": shopify_creds['access_token']}
-        params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "line_items,total_shipping_price_set,subtotal_price,created_at"}
+        params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "id,line_items,total_shipping_price_set,subtotal_price,created_at"}
         response = requests.get(url, headers=headers, params=params, timeout=10)
         response.raise_for_status()
         orders = response.json().get('orders', [])
+        
         purchase_data = []
+        order_details = []
+        total_purchases = 0
+
         for order in orders:
             subtotal = float(order.get('subtotal_price', 0.0))
             shipping_fee = float(order.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0.0))
+            total_revenue = subtotal + shipping_fee
+            order_id = order['id']
             order_created_at = order['created_at']
+            
+            product_titles = [item['title'] for item in order.get('line_items', [])]
+            marketer = None
+            if product_titles:
+                marketer = get_marketer_from_page_title(product_titles[0])
+            
+            if marketer:
+                 order_details.append({
+                    'id': order_id,
+                    'marketer': marketer,
+                    'total_revenue': total_revenue,
+                    'products': product_titles
+                })
+
             for item in order.get('line_items', []):
-                item_price = float(item['price'])
                 item_quantity = item['quantity']
+                total_purchases += item_quantity
+                item_price = float(item['price'])
                 item_total_value = item_price * item_quantity
                 shipping_allocation = (shipping_fee * (item_total_value / subtotal)) if subtotal > 0 else 0
                 purchase_data.append({'Product Title': item['title'], 'Purchases': item_quantity, 'Revenue': item_total_value + shipping_allocation, 'created_at': order_created_at})
-        if not purchase_data: 
-            return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0
-        df = pd.DataFrame(purchase_data)
-        return df, df['Purchases'].sum()
+
+        df = pd.DataFrame(purchase_data) if purchase_data else pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"])
+        return df, total_purchases, order_details
     except Exception: 
-        return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0
+        return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0, []
 
 @st.cache_data(ttl=30)
 def fetch_realtime_data():
@@ -164,17 +178,21 @@ def fetch_realtime_data():
             pages_data.append({"Page Title and Screen Class": row.dimension_values[0].value, "Active Users": int(row.metric_values[0].value)})
             total_views += int(row.metric_values[1].value) if len(row.metric_values) > 1 else 0
         ga_pages_df = pd.DataFrame(pages_data)
+        
+        ga_raw_df = ga_pages_df.copy()
+
         per_min_data = {str(i): 0 for i in range(30)}
         for row in per_min_response.rows: per_min_data[row.dimension_values[0].value] = int(row.metric_values[0].value)
         per_min_df = pd.DataFrame([{"Time": f"-{int(k)} min", "Active Users": v} for k, v in sorted(per_min_data.items(), key=lambda item: int(item[0]))])
-        shopify_purchases_df, purchase_count_30min = fetch_shopify_realtime_purchases_rest()
+        
+        shopify_raw_df, purchase_count_30min, order_details = fetch_shopify_realtime_purchases_rest()
         
         purchase_events = []
-        if not shopify_purchases_df.empty:
-            for _, purchase in shopify_purchases_df.iterrows():
+        if not shopify_raw_df.empty:
+            for _, purchase in shopify_raw_df.iterrows():
                 title = purchase['Product Title']
                 marketer = get_marketer_from_page_title(title)
-                timestamp = pd.to_datetime(purchase['created_at'])
+                timestamp = pd.to_datetime(purchase['created_at'], utc=True)
                 quantity = purchase['Purchases']
                 
                 product_symbol = None
@@ -192,7 +210,7 @@ def fetch_realtime_data():
                         })
 
         ga_pages_df_processed = ga_pages_df.copy()
-        shopify_purchases_df_processed = shopify_purchases_df.copy()
+        shopify_purchases_df_processed = shopify_raw_df.copy()
         if not ga_pages_df_processed.empty:
             ga_pages_df_processed[['core_title', 'symbol']] = ga_pages_df_processed['Page Title and Screen Class'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
             if not shopify_purchases_df_processed.empty:
@@ -212,9 +230,9 @@ def fetch_realtime_data():
         else:
             final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
         now_in_utc = datetime.now(pytz.utc)
-        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df, purchase_events
+        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_raw_df, shopify_raw_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df, purchase_events, order_details
     except Exception as e:
-        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], []
 
 @st.cache_data
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
@@ -323,7 +341,6 @@ def fetch_historical_page_report(start_date: str, end_date: str, segment: str):
     except Exception as e:
         st.error(f"Error fetching Historical Page Report data: {e}"); return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- LUỒNG CHÍNH CỦA ỨNG DỤNG ---
 if not cookies.ready(): st.spinner(); st.stop()
 if 'user_info' not in st.session_state:
     st.session_state['user_info'] = get_user_details(cookies.get('username'))
@@ -345,6 +362,23 @@ if not st.session_state['user_info']:
 else:
     effective_user_info = dict(st.session_state['user_info'])
     avatar_url = effective_user_info.get("avatar_url") or default_avatar_url
+    
+    banner_placeholder = st.empty()
+    if 'banner_notification' in st.session_state:
+        with banner_placeholder.container():
+            st.success(st.session_state.banner_notification, icon="🎉")
+            if st.button("Dismiss", key="dismiss_banner"):
+                del st.session_state.banner_notification
+                st.rerun()
+
+    if st.session_state.get('show_celebration', False):
+        if time.time() - st.session_state.get('celebration_start_time', 0) < 30:
+            st.balloons()
+        else:
+            del st.session_state.show_celebration
+            if 'celebration_start_time' in st.session_state:
+                del st.session_state.celebration_start_time
+
     with st.sidebar:
         st.markdown(f"""<div style="display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 20px;"><img src="{avatar_url}" style="width: 100px; height: 100px; border-radius: 50%; object-fit: cover; border: 2px solid #3c4043;"><p style="margin-top: 10px; margin-bottom: 0; font-size: 1em; color: #d0d0d0;">Welcome,</p><p style="margin: 0; font-size: 1.25em; font-weight: bold; color: #1ED760;">{effective_user_info['username']}</p></div>""", unsafe_allow_html=True)
         st.title("Navigation")
@@ -362,9 +396,31 @@ else:
                 impersonating = True
                 effective_user_info = employee_details[selected_user_name]
                 st.info(f"Viewing as **{selected_user_name}**")
+        
         debug_mode = st.checkbox("Enable Debug Mode") if st.session_state['user_info']['role'] == 'admin' and not impersonating else False
         if debug_mode: st.warning("Debug mode is ON.")
-    
+
+        if st.session_state['user_info']['role'] == 'admin' and not impersonating:
+            with st.expander("🛠️ Admin Tools"):
+                st.info("Use this to test notification and chart symbols.", icon="🧪")
+                
+                marketer_list = sorted(list(set(page_title_map.values())))
+                
+                selected_marketer = st.selectbox(
+                    "Select Marketer to simulate for:",
+                    options=marketer_list
+                )
+                
+                if st.button("Simulate New Sale", use_container_width=True):
+                    st.session_state.mock_order = {
+                        'id': f"mock_{int(time.time())}",
+                        'marketer': selected_marketer,
+                        'total_revenue': round(random.uniform(25.5, 199.9), 2),
+                        'products': ["Simulated Awesome Product"],
+                        'timestamp': datetime.now(timezone.utc)
+                    }
+                    st.rerun()
+
     if page == "Profile":
         st.title("👤 Your Profile"); st.header("Update Your Avatar")
         col1, col2 = st.columns([1, 2])
@@ -387,6 +443,9 @@ else:
 
     elif page == "Realtime Dashboard":
         st.title("🚀 Realtime Dashboard")
+        
+        notification_manager = NotificationManager()
+
         with st.sidebar:
             selected_tz_name = st.selectbox("Select Timezone", options=list(TIMEZONE_MAPPINGS.keys()), key="timezone_selector")
             try: refresh_interval = int(cookies.get('refresh_interval', 30))
@@ -412,7 +471,20 @@ else:
             if fetch_result[0] is None:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df, purchase_events) = fetch_result
+                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_purchases_df_processed, merged_df, purchase_events, order_details) = fetch_result
+                
+                if 'mock_order' in st.session_state:
+                    mock_data = st.session_state['mock_order']
+                    order_details.append(mock_data)
+                    purchase_events.append({
+                        'timestamp': mock_data['timestamp'],
+                        'Marketer': mock_data['marketer'],
+                        'symbol': '🧪'
+                    })
+                    del st.session_state['mock_order']
+
+                notification_manager.check_for_new_sales(order_details)
+
                 localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
                 st.markdown(f"*Last update: {localized_fetch_time.strftime('%Y-%m-%d %H:%M:%S')}*")
 
@@ -453,42 +525,44 @@ else:
                     fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', color_discrete_sequence=px.colors.qualitative.Plotly)
                     fig_trend.update_traces(line=dict(width=3))
                     
-                    # --- BẮT ĐẦU LOGIC MỚI, MẠNH MẼ HƠN ĐỂ VẼ BIỂU TƯỢNG ---
                     if purchase_events and not history_df.empty:
                         events_df = pd.DataFrame(purchase_events)
+                        events_df['timestamp'] = pd.to_datetime(events_df['timestamp'], utc=True)
                         events_df['timestamp'] = events_df['timestamp'].dt.tz_convert(selected_tz)
                         
                         for marketer in events_df['Marketer'].unique():
                             if marketer in history_df.columns:
                                 marketer_history = history_df[marketer].dropna()
-                                if len(marketer_history) < 2: continue
+                                if marketer_history.empty: continue
 
                                 marketer_events = events_df[events_df['Marketer'] == marketer]
+                                events_y = []
                                 
-                                history_x_numeric = marketer_history.index.astype(np.int64)
-                                history_y = marketer_history.values
-                                events_x_numeric = marketer_events['timestamp'].astype(np.int64)
+                                if len(marketer_history) >= 2:
+                                    history_x_numeric = marketer_history.index.astype(np.int64)
+                                    history_y = marketer_history.values
+                                    events_x_numeric = marketer_events['timestamp'].astype(np.int64)
+                                    events_y = np.interp(events_x_numeric, history_x_numeric, history_y)
+                                elif len(marketer_history) == 1:
+                                    events_y = [marketer_history.iloc[0]] * len(marketer_events)
 
-                                # Sử dụng nội suy để tìm vị trí Y chính xác trên đường kẻ
-                                events_y = np.interp(events_x_numeric, history_x_numeric, history_y)
-
-                                fig_trend.add_trace(go.Scatter(
-                                    x=marketer_events['timestamp'],
-                                    y=events_y,
-                                    mode='markers+text',
-                                    text=marketer_events['symbol'],
-                                    textposition='middle center',
-                                    textfont=dict(size=16, color='white'),
-                                    marker=dict(
-                                        color='rgba(0, 0, 0, 0.6)', # Nền đen mờ
-                                        size=22,
-                                        symbol='circle',
-                                        line=dict(width=0)
-                                    ),
-                                    hoverinfo='none',
-                                    showlegend=False
-                                ))
-                    # --- KẾT THÚC LOGIC MỚI ---
+                                if len(events_y) > 0:
+                                    fig_trend.add_trace(go.Scatter(
+                                        x=marketer_events['timestamp'],
+                                        y=events_y,
+                                        mode='markers+text',
+                                        text=marketer_events['symbol'],
+                                        textposition='middle center',
+                                        textfont=dict(size=16, color='white'),
+                                        marker=dict(
+                                            color='rgba(0, 0, 0, 0.6)',
+                                            size=22,
+                                            symbol='circle',
+                                            line=dict(width=0)
+                                        ),
+                                        hoverinfo='none',
+                                        showlegend=False
+                                    ))
                     
                     fig_trend.update_layout(
                         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
@@ -552,7 +626,8 @@ else:
                         shopify_grouped_debug = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(Purchases=('Purchases', 'sum'), Revenue=('Revenue', 'sum'), LastPurchaseTime=('created_at', 'max')).reset_index()
                         st.dataframe(shopify_grouped_debug); st.code(shopify_grouped_debug.to_json(orient='records', indent=2))
                     with st.expander("3. Merged Data"):
-                        st.dataframe(merged_final_df); st.code(merged_final_df.to_json(orient='records', indent=2))
+                        # SỬA LỖI: SỬ DỤNG ĐÚNG TÊN BIẾN
+                        st.dataframe(merged_df); st.code(merged_df.to_json(orient='records', indent=2))
                     with st.expander("4. Purchase Events for Chart"):
                         st.write("List of events passed to chart renderer:"); st.json(json.dumps(purchase_events, default=str))
 
