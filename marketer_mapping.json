@@ -21,6 +21,7 @@
     "MKT14": "MKT14",
     "MKT16": "MKT16"
   },
+  
   "landing_page_mapping": {
     "sku-mkt1": "MKT1",
     "sku-mkt2": "MKT2",
@@ -32,5 +33,10 @@
     "sku-mkt12": "MKT12",
     "sku-mkt14": "MKT14",
     "sku-mkt16": "MKT16"
+  },
+
+  "product_to_symbol_mapping": {
+    "128 Hz Healing Instrument": "🌱",
+    "Hidden Camera Detector": "📹"
   }
 }
