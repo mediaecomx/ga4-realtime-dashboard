@@ -9,3 +9,4 @@ protobuf
 pytz
 shopifyapi
 supabase
+streamlit_extras
