@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go # Thêm thư viện này
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     RunRealtimeReportRequest, RunReportRequest, Dimension, Metric, MinuteRange,
@@ -36,6 +37,8 @@ try:
         full_mapping = json.load(f)
         page_title_map = full_mapping.get('page_title_mapping', {})
         landing_page_map = full_mapping.get('landing_page_mapping', {})
+        # TẢI THÊM MAPPING SẢN PHẨM -> BIỂU TƯỢNG
+        product_symbol_map = full_mapping.get('product_to_symbol_mapping', {})
 except FileNotFoundError:
     st.error("Lỗi: Không tìm thấy file marketer_mapping.json."); st.stop()
 except (json.JSONDecodeError, KeyError):
@@ -104,10 +107,8 @@ def extract_core_and_symbol(title: str, symbols: list):
     
 def highlight_metrics(val):
     should_highlight = False
-    # Điều kiện cho các cột số
     if isinstance(val, (int, float)) and val > 0:
         should_highlight = True
-    # Điều kiện cho cột thời gian (kiểu chuỗi)
     elif isinstance(val, str) and val != "—":
         should_highlight = True
     
@@ -128,7 +129,6 @@ def fetch_shopify_realtime_purchases_rest():
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
         url = f"https://{shopify_creds['store_url']}/admin/api/{shopify_creds['api_version']}/orders.json"
         headers = {"X-Shopify-Access-Token": shopify_creds['access_token']}
-        # THÊM `created_at` VÀO TRƯỜNG LẤY DỮ LIỆU
         params = {"created_at_min": thirty_minutes_ago, "status": "any", "fields": "line_items,total_shipping_price_set,subtotal_price,created_at"}
         response = requests.get(url, headers=headers, params=params, timeout=10)
         response.raise_for_status()
@@ -137,16 +137,14 @@ def fetch_shopify_realtime_purchases_rest():
         for order in orders:
             subtotal = float(order.get('subtotal_price', 0.0))
             shipping_fee = float(order.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0.0))
-            order_created_at = order['created_at'] # LẤY THỜI GIAN TẠO ĐƠN HÀNG
+            order_created_at = order['created_at']
             for item in order.get('line_items', []):
                 item_price = float(item['price'])
                 item_quantity = item['quantity']
                 item_total_value = item_price * item_quantity
                 shipping_allocation = (shipping_fee * (item_total_value / subtotal)) if subtotal > 0 else 0
-                # THÊM `created_at` VÀO DỮ LIỆU
                 purchase_data.append({'Product Title': item['title'], 'Purchases': item_quantity, 'Revenue': item_total_value + shipping_allocation, 'created_at': order_created_at})
         if not purchase_data: 
-            # CẬP NHẬT CỘT KHI KHÔNG CÓ DỮ LIỆU
             return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue", "created_at"]), 0
         df = pd.DataFrame(purchase_data)
         return df, df['Purchases'].sum()
@@ -170,36 +168,57 @@ def fetch_realtime_data():
         for row in per_min_response.rows: per_min_data[row.dimension_values[0].value] = int(row.metric_values[0].value)
         per_min_df = pd.DataFrame([{"Time": f"-{int(k)} min", "Active Users": v} for k, v in sorted(per_min_data.items(), key=lambda item: int(item[0]))])
         shopify_purchases_df, purchase_count_30min = fetch_shopify_realtime_purchases_rest()
+        
+        # TẠO DANH SÁCH CÁC SỰ KIỆN MUA HÀNG ĐỂ VẼ LÊN BIỂU ĐỒ
+        purchase_events = []
+        if not shopify_purchases_df.empty:
+            for _, purchase in shopify_purchases_df.iterrows():
+                title = purchase['Product Title']
+                marketer = get_marketer_from_page_title(title)
+                timestamp = pd.to_datetime(purchase['created_at'])
+                quantity = purchase['Purchases']
+                
+                # Tìm biểu tượng tương ứng với sản phẩm
+                product_symbol = None
+                for name_part, symbol in product_symbol_map.items():
+                    if name_part in title:
+                        product_symbol = symbol
+                        break
+                
+                if marketer and product_symbol:
+                    # Nếu một đơn hàng có nhiều sản phẩm, tạo nhiều sự kiện
+                    for _ in range(quantity):
+                        purchase_events.append({
+                            'timestamp': timestamp,
+                            'Marketer': marketer,
+                            'symbol': product_symbol
+                        })
+
         ga_pages_df_processed = ga_pages_df.copy()
         shopify_purchases_df_processed = shopify_purchases_df.copy()
         if not ga_pages_df_processed.empty:
             ga_pages_df_processed[['core_title', 'symbol']] = ga_pages_df_processed['Page Title and Screen Class'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
             if not shopify_purchases_df_processed.empty:
                 shopify_purchases_df_processed[['core_title', 'symbol']] = shopify_purchases_df_processed['Product Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-                # KHI NHÓM DỮ LIỆU, TÍNH TỔNG Purchases, Revenue VÀ LẤY THỜI GIAN LỚN NHẤT (max)
                 shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(
-                    Purchases=('Purchases', 'sum'),
-                    Revenue=('Revenue', 'sum'),
-                    LastPurchaseTime=('created_at', 'max')
+                    Purchases=('Purchases', 'sum'), Revenue=('Revenue', 'sum'), LastPurchaseTime=('created_at', 'max')
                 ).reset_index()
                 merged_df = pd.merge(ga_pages_df_processed, shopify_grouped, on=['core_title', 'symbol'], how='left')
             else:
                 merged_df = ga_pages_df_processed.copy()
-                merged_df['Purchases'] = 0
-                merged_df['Revenue'] = 0.0
-                merged_df['LastPurchaseTime'] = pd.NaT # Thêm cột trống nếu không có đơn hàng nào
+                merged_df['Purchases'] = 0; merged_df['Revenue'] = 0.0; merged_df['LastPurchaseTime'] = pd.NaT
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
             merged_df["Revenue"] = merged_df["Revenue"].fillna(0).astype(float)
             merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"]!=0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
-            # THÊM CỘT `LastPurchaseTime` VÀO DATAFRAME CUỐI CÙNG
             final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR", "LastPurchaseTime"]]
         else:
             final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
         now_in_utc = datetime.now(pytz.utc)
-        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df
+        # TRẢ VỀ THÊM `purchase_events`
+        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df, purchase_events
     except Exception as e:
-        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
 
 @st.cache_data
 def get_date_range(selection: str) -> tuple[datetime.date, datetime.date]:
@@ -381,13 +400,11 @@ else:
                 if new_interval != refresh_interval: cookies['refresh_interval'] = str(new_interval); cookies.save(); st.rerun()
                 refresh_interval = new_interval
                 
-                # --- WIDGET MỚI ĐỂ TÙY CHỈNH KHUNG THỜI GIAN ---
                 time_window_options = [30, 60, 90, 120]
                 current_window = st.session_state.get('time_window', 60)
                 selected_window = st.selectbox("Set Chart Time Window (minutes)", options=time_window_options, index=time_window_options.index(current_window))
                 if selected_window != current_window:
                     st.session_state.time_window = selected_window
-                    # Xóa lịch sử cũ để biểu đồ bắt đầu lại với khung thời gian mới
                     st.session_state.realtime_history = []
                     st.rerun()
         
@@ -399,7 +416,8 @@ else:
             if fetch_result[0] is None:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df) = fetch_result
+                # NHẬN THÊM `purchase_events`
+                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df, purchase_events) = fetch_result
                 localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
                 st.markdown(f"*Last update: {localized_fetch_time.strftime('%Y-%m-%d %H:%M:%S')}*")
 
@@ -439,6 +457,36 @@ else:
                 if not history_df_melted.empty:
                     fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', color_discrete_sequence=px.colors.qualitative.Plotly)
                     fig_trend.update_traces(line=dict(width=3))
+                    
+                    # LOGIC MỚI: THÊM BIỂU TƯỢNG ĐƠN HÀNG VÀO BIỂU ĐỒ
+                    if purchase_events and not history_df.empty:
+                        events_df = pd.DataFrame(purchase_events)
+                        events_df['timestamp'] = events_df['timestamp'].dt.tz_convert(selected_tz)
+                        
+                        y_values = []
+                        for _, event in events_df.iterrows():
+                            marketer = event['Marketer']
+                            timestamp = event['timestamp']
+                            if marketer in history_df.columns:
+                                # Tìm giá trị user gần nhất tại thời điểm có đơn hàng
+                                user_count = history_df.asof(timestamp)[marketer]
+                                y_values.append(user_count)
+                            else:
+                                y_values.append(np.nan)
+                        events_df['y'] = y_values
+                        events_df.dropna(subset=['y'], inplace=True)
+
+                        fig_trend.add_trace(go.Scatter(
+                            x=events_df['timestamp'],
+                            y=events_df['y'],
+                            mode='text',
+                            text=events_df['symbol'],
+                            textposition='top center',
+                            textfont=dict(size=16, color='white'),
+                            hoverinfo='none',
+                            showlegend=False
+                        ))
+
                     fig_trend.update_layout(
                         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
                         yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), legend_title_text='',
@@ -478,10 +526,8 @@ else:
 
                     st.dataframe(
                         pages_to_display.style.format({
-                            'CR': "{:.2f}%", 
-                            'Revenue': "${:,.2f}"
+                            'CR': "{:.2f}%", 'Revenue': "${:,.2f}"
                         }).apply(
-                            # THÊM `Last Purchase Time` VÀO DANH SÁCH CỘT CẦN LÀM NỔI BẬT
                             lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'CR', 'Last Purchase Time'] else [''] * len(x), axis=0
                         ), 
                         use_container_width=True,
@@ -504,6 +550,9 @@ else:
                         st.dataframe(shopify_grouped_debug); st.code(shopify_grouped_debug.to_json(orient='records', indent=2))
                     with st.expander("3. Merged Data"):
                         st.dataframe(merged_final_df); st.code(merged_final_df.to_json(orient='records', indent=2))
+                    with st.expander("4. Purchase Events for Chart"):
+                        st.write("List of events passed to chart renderer:"); st.json(json.dumps(purchase_events, default=str))
+
 
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True); time.sleep(1)
