@@ -65,7 +65,6 @@ def check_credentials(username, password):
     return None
 
 try:
-    # Chỉ cần kết nối tới Supabase và Shopify cho việc lấy dữ liệu lịch sử
     google_creds_dict = dict(st.secrets["google_credentials"])
     google_creds_dict["private_key"] = google_creds_dict["private_key"].replace("\\n", "\n")
     ga_credentials = service_account.Credentials.from_service_account_info(google_creds_dict, scopes=["https://www.googleapis.com/auth/analytics.readonly"])
@@ -121,25 +120,60 @@ def highlight_metrics(val):
 def get_marketer_from_page_title(title: str) -> str:
     for symbol in SYMBOLS:
         if symbol in title:
-            return page_title_map[symbol]
+            return page_title_map.get(symbol, "")
     return ""
 
 def fetch_realtime_data_from_supabase():
     try:
-        # Bước 1: Đọc dữ liệu thô từ Supabase
         response = supabase.table("realtime_data").select("data").eq("id", 1).single().execute()
         
         if not response.data or not response.data.get("data"):
             st.warning("Data is not available yet. Please wait for the next fetch cycle.")
-            return None, None, None, None, None, None, None, None, [], []
+            empty_df = pd.DataFrame()
+            return None, None, None, None, empty_df, empty_df, None, empty_df, [], []
 
         cached_data = response.data["data"]
         ga_data = cached_data.get("ga_data", [])
         shopify_orders = cached_data.get("shopify_orders", [])
         
-        # Bước 2: Xử lý dữ liệu thô (logic giống hệt phiên bản cũ)
+        purchase_events = []
+        order_details = []
+        purchase_count_30min = 0
+        purchase_data = []
+
+        for order in shopify_orders:
+            subtotal = float(order.get('subtotal_price', 0.0))
+            shipping_fee = float(order.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0.0))
+            marketer = get_marketer_from_page_title(order['line_items'][0]['title'] if order['line_items'] else "")
+            
+            if marketer: # Ensure marketer is identified before adding to details
+                order_details.append({
+                    'id': order['id'], 'marketer': marketer,
+                    'total_revenue': subtotal + shipping_fee,
+                    'products': [item['title'] for item in order['line_items']]
+                })
+
+            for item in order.get('line_items', []):
+                item_quantity = item['quantity']
+                purchase_count_30min += item_quantity
+                product_symbol = next((s for part, s in product_symbol_map.items() if part in item['title']), None)
+                if marketer and product_symbol:
+                    for _ in range(item_quantity):
+                        purchase_events.append({
+                            'timestamp': pd.to_datetime(order['created_at'], utc=True),
+                            'Marketer': marketer,
+                            'symbol': f"{product_symbol}{marketer}"
+                        })
+                purchase_data.append({
+                    'Product Title': item['title'], 'Purchases': item_quantity,
+                    'Revenue': (float(item['price']) * item_quantity) + ((shipping_fee * (float(item['price']) * item_quantity / subtotal)) if subtotal > 0 else 0),
+                    'created_at': order['created_at']
+                })
+        
+        shopify_purchases_df = pd.DataFrame(purchase_data) if purchase_data else pd.DataFrame()
+
         if not ga_data:
-            return 0, 0, 0, 0, pd.DataFrame(), pd.DataFrame(), datetime.now(timezone.utc), pd.DataFrame(), [], []
+            return 0, 0, 0, purchase_count_30min, pd.DataFrame(), pd.DataFrame(), datetime.now(timezone.utc), pd.DataFrame(ga_data), order_details, purchase_events
 
         full_df = pd.DataFrame(ga_data)
         active_users_30min = full_df.groupby('Page Title and Screen Class')['Active Users'].first().sum()
@@ -152,30 +186,6 @@ def fetch_realtime_data_from_supabase():
         
         ga_pages_df = full_df.groupby("Page Title and Screen Class").agg(ActiveUsers=('Active Users', 'first')).reset_index()
 
-        # Xử lý dữ liệu Shopify
-        purchase_data = []
-        order_details = []
-        purchase_count_30min = 0
-        for order in shopify_orders:
-            subtotal = float(order.get('subtotal_price', 0.0))
-            shipping_fee = float(order.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0.0))
-            order_details.append({
-                'id': order['id'],
-                'marketer': get_marketer_from_page_title(order['line_items'][0]['title'] if order['line_items'] else ""),
-                'total_revenue': subtotal + shipping_fee,
-                'products': [item['title'] for item in order['line_items']]
-            })
-            for item in order.get('line_items', []):
-                item_quantity = item['quantity']
-                purchase_count_30min += item_quantity
-                item_price = float(item['price'])
-                item_total_value = item_price * item_quantity
-                shipping_allocation = (shipping_fee * (item_total_value / subtotal)) if subtotal > 0 else 0
-                purchase_data.append({'Product Title': item['title'], 'Purchases': item_quantity, 'Revenue': item_total_value + shipping_allocation, 'created_at': order['created_at']})
-        
-        shopify_purchases_df = pd.DataFrame(purchase_data) if purchase_data else pd.DataFrame()
-
-        # Gộp và tính toán
         final_pages_df = pd.DataFrame()
         if not ga_pages_df.empty:
             ga_pages_df_processed = ga_pages_df.copy()
@@ -184,22 +194,21 @@ def fetch_realtime_data_from_supabase():
             if not shopify_purchases_df.empty:
                 shopify_purchases_df_processed = shopify_purchases_df.copy()
                 shopify_purchases_df_processed[['core_title', 'symbol']] = shopify_purchases_df_processed['Product Title'].apply(lambda x: pd.Series(extract_core_and_symbol(x, SYMBOLS)))
-                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol'])[['Purchases', 'Revenue']].sum().reset_index()
+                shopify_grouped = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(Purchases=('Purchases', 'sum'), Revenue=('Revenue', 'sum'), LastPurchaseTime=('created_at', 'max')).reset_index()
                 merged_df = pd.merge(ga_pages_df_processed, shopify_grouped, on=['core_title', 'symbol'], how='left')
             else:
                 merged_df = ga_pages_df_processed.copy()
-                merged_df['Purchases'] = 0
-                merged_df['Revenue'] = 0.0
+                merged_df['Purchases'] = 0; merged_df['Revenue'] = 0.0; merged_df['LastPurchaseTime'] = pd.NaT
             
+            merged_df.rename(columns={"ActiveUsers": "Active Users"}, inplace=True)
             merged_df["Purchases"] = merged_df["Purchases"].fillna(0).astype(int)
             merged_df["Revenue"] = merged_df["Revenue"].fillna(0).astype(float)
-            merged_df.rename(columns={"ActiveUsers": "Active Users"}, inplace=True)
             merged_df["CR"] = np.divide(merged_df["Purchases"], merged_df["Active Users"], out=np.zeros_like(merged_df["Active Users"], dtype=float), where=(merged_df["Active Users"] != 0)) * 100
             merged_df['Marketer'] = merged_df['Page Title and Screen Class'].apply(get_marketer_from_page_title)
-            final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR"]]
+            final_pages_df = merged_df.sort_values(by="Active Users", ascending=False)[["Page Title and Screen Class", "Marketer", "Active Users", "Purchases", "Revenue", "CR", "LastPurchaseTime"]]
 
         now_in_utc = datetime.fromisoformat(cached_data['last_updated_utc'])
-        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, pd.DataFrame(ga_data), order_details
+        return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, pd.DataFrame(ga_data), order_details, purchase_events
 
     except Exception as e:
         return None, None, None, None, None, None, str(e), None, [], []
@@ -311,7 +320,6 @@ def fetch_historical_page_report(start_date: str, end_date: str, segment: str):
     except Exception as e:
         st.error(f"Error fetching Historical Page Report data: {e}"); return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- LUỒNG CHÍNH CỦA ỨNG DỤNG ---
 if not cookies.ready(): st.spinner(); st.stop()
 if 'user_info' not in st.session_state:
     st.session_state['user_info'] = get_user_details(cookies.get('username'))
@@ -340,7 +348,6 @@ else:
         rain_duration = 30
     rain_emoji = cookies.get('rain_emoji', '💰')
     rain_enabled = cookies.get('rain_enabled', 'True') == 'True'
-
 
     banner_placeholder = st.empty()
     if 'banner_notification' in st.session_state:
@@ -429,7 +436,7 @@ else:
                             'marketer': marketer,
                             'total_revenue': round(random.uniform(25.5, 199.9), 2),
                             'products': [mock_product_name],
-                            'timestamp': datetime.now(timezone.utc)
+                            'timestamp': datetime.now(timezone.utc).isoformat()
                         })
                     st.session_state.mock_orders = mock_orders
                     st.rerun()
@@ -480,12 +487,13 @@ else:
         timer_placeholder, placeholder = st.empty(), st.empty()
         
         with placeholder.container():
-            fetch_result = fetch_realtime_data_from_supabase() # THAY ĐỔI QUAN TRỌNG
+            fetch_result = fetch_realtime_data_from_supabase()
             
             if fetch_result[0] is None:
-                st.error(f"Error fetching data: {fetch_result[6]}")
+                if fetch_result[6]:
+                    st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, order_details) = fetch_result
+                (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, order_details, purchase_events) = fetch_result
                 
                 if 'mock_orders' in st.session_state:
                     mock_data_list = st.session_state.get('mock_orders', [])
@@ -630,18 +638,8 @@ else:
                     st.write("No data available for your user.")
                 if debug_mode:
                     st.divider(); st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
-                    with st.expander("1. Raw Data from APIs"):
-                        st.write("GA (Traffic):"); st.dataframe(ga_raw_df); st.code(ga_raw_df.to_json(orient='records', indent=2))
-                        st.write("Shopify (Purchases):"); st.dataframe(shopify_raw_df); st.code(shopify_raw_df.to_json(orient='records', indent=2))
-                    with st.expander("2. Processed Data (before merge)"):
-                        st.write("GA Processed:"); st.dataframe(ga_processed_df); st.code(ga_processed_df.to_json(orient='records', indent=2))
-                        st.write("Shopify Processed & Grouped:"); 
-                        shopify_grouped_debug = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(Purchases=('Purchases', 'sum'), Revenue=('Revenue', 'sum'), LastPurchaseTime=('created_at', 'max')).reset_index()
-                        st.dataframe(shopify_grouped_debug); st.code(shopify_grouped_debug.to_json(orient='records', indent=2))
-                    with st.expander("3. Merged Data"):
-                        st.dataframe(merged_df); st.code(merged_df.to_json(orient='records', indent=2))
-                    with st.expander("4. Purchase Events for Chart"):
-                        st.write("List of events passed to chart renderer:"); st.json(json.dumps(purchase_events, default=str))
+                    st.json(cached_data)
+
 
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True); time.sleep(1)
