@@ -9,7 +9,6 @@
     "💙": "MKT2",
     "💛": "MKT5",
     "♥️": "MKT7",
-
     "MKT1": "MKT1",
     "MKT2": "MKT2",
     "MKT5": "MKT5",
@@ -37,6 +36,7 @@
 
   "product_to_symbol_mapping": {
     "128 Hz Healing Instrument": "🌱",
-    "Hidden Camera Detector": "📹"
+    "Hidden Camera Detector": "📹",
+    "Simulated Awesome Product": "🧪"
   }
 }
