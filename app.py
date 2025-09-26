@@ -488,11 +488,160 @@ else:
                 (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, order_details) = fetch_result
                 
                 if 'mock_orders' in st.session_state:
-                    # ... (Phần giả lập giữ nguyên) ...
+                    mock_data_list = st.session_state.get('mock_orders', [])
+                    for mock_data in mock_data_list:
+                        order_details.append(mock_data)
+                        purchase_events.append({
+                            'timestamp': mock_data['timestamp'],
+                            'Marketer': mock_data['marketer'],
+                            'symbol': f"🧪{mock_data['marketer']}"
+                        })
+                    del st.session_state['mock_orders']
 
                 notification_manager.check_for_new_sales(order_details)
 
-                # ... (Toàn bộ phần còn lại của giao diện dashboard giữ nguyên) ...
+                localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
+                st.markdown(f"*Last update: {localized_fetch_time.strftime('%Y-%m-%d %H:%M:%S')}*")
+
+                top_col1, top_col2, top_col3 = st.columns(3)
+                with top_col1:
+                    bg_color, text_color = get_heatmap_color_and_text(active_users_5min, TARGET_USERS_5MIN, COLOR_COLD, COLOR_HOT)
+                    st.markdown(f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">ACTIVE USERS (5 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{active_users_5min}</p></div>""", unsafe_allow_html=True)
+                with top_col2:
+                    bg_color, text_color = get_heatmap_color_and_text(active_users_30min, TARGET_USERS_30MIN, COLOR_COLD, COLOR_HOT)
+                    st.markdown(f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">ACTIVE USERS (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{active_users_30min}</p></div>""", unsafe_allow_html=True)
+                with top_col3:
+                    bg_color, text_color = get_heatmap_color_and_text(total_views, TARGET_VIEWS_30MIN, COLOR_COLD, COLOR_HOT)
+                    st.markdown(f"""<div style="background-color: {bg_color}; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: {text_color}; margin-bottom: 5px;">VIEWS (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: {text_color}; margin: 0;">{total_views}</p></div>""", unsafe_allow_html=True)
+                
+                st.divider()
+                
+                bottom_col1, bottom_col2 = st.columns(2)
+                with bottom_col1: st.markdown(f"""<div style="background-color: #025402; border: 2px solid #057805; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">PURCHASES (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23d123; margin: 0;">{purchase_count_30min}</p></div>""", unsafe_allow_html=True)
+                with bottom_col2: st.markdown(f"""<div style="background-color: #013254; border: 2px solid #0564a8; border-radius: 7px; padding: 20px; text-align: center; height: 100%;"><p style="font-size: 16px; color: #b0b0b0; margin-bottom: 5px;">CONVERSION RATE (30 MIN)</p><p style="font-size: 32px; font-weight: bold; color: #23a7d1; margin: 0;">{(purchase_count_30min / active_users_30min * 100) if active_users_30min > 0 else 0:.2f}%</p></div>""", unsafe_allow_html=True)
+                
+                if not pages_df_full.empty:
+                    marketer_summary = pages_df_full.groupby('Marketer')['Active Users'].sum()
+                    current_snapshot = marketer_summary.to_dict()
+                else: current_snapshot = {}
+                st.session_state.realtime_history.append({'timestamp': localized_fetch_time, **current_snapshot})
+                
+                time_window_minutes = st.session_state.get('time_window', 60)
+                MAX_HISTORY_POINTS = int((time_window_minutes * 60) / refresh_interval)
+
+                if len(st.session_state.realtime_history) > MAX_HISTORY_POINTS:
+                    st.session_state.realtime_history = st.session_state.realtime_history[-MAX_HISTORY_POINTS:]
+                history_df = pd.DataFrame(st.session_state.realtime_history).set_index('timestamp')
+                history_df_melted = history_df.reset_index().melt(id_vars='timestamp', var_name='Marketer', value_name='Active Users').dropna(subset=['Active Users'])
+                
+                st.divider()
+                st.subheader(f"Active Users Trend by Marketer (Last {time_window_minutes} minutes)")
+                if not history_df_melted.empty:
+                    fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', color_discrete_sequence=px.colors.qualitative.Plotly)
+                    fig_trend.update_traces(line=dict(width=3))
+                    
+                    if purchase_events and not history_df.empty:
+                        events_df = pd.DataFrame(purchase_events)
+                        events_df['timestamp'] = pd.to_datetime(events_df['timestamp'], utc=True)
+                        events_df['timestamp'] = events_df['timestamp'].dt.tz_convert(selected_tz)
+                        
+                        for marketer in events_df['Marketer'].unique():
+                            if marketer in history_df.columns:
+                                marketer_history = history_df[marketer].dropna()
+                                if marketer_history.empty: continue
+
+                                marketer_events = events_df[events_df['Marketer'] == marketer]
+                                events_y = []
+                                
+                                if len(marketer_history) >= 2:
+                                    history_x_numeric = marketer_history.index.astype(np.int64)
+                                    history_y = marketer_history.values
+                                    events_x_numeric = marketer_events['timestamp'].astype(np.int64)
+                                    events_y = np.interp(events_x_numeric, history_x_numeric, history_y)
+                                elif len(marketer_history) == 1:
+                                    events_y = [marketer_history.iloc[0]] * len(marketer_events)
+
+                                if len(events_y) > 0:
+                                    fig_trend.add_trace(go.Scatter(
+                                        x=marketer_events['timestamp'],
+                                        y=events_y,
+                                        mode='text',
+                                        text=marketer_events['symbol'],
+                                        textposition='top center',
+                                        textfont=dict(size=12, color='#FFFFFF'),
+                                        hoverinfo='none',
+                                        showlegend=False
+                                    ))
+                    
+                    fig_trend.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                        yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), legend_title_text='',
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        hovermode="x unified"
+                    )
+                    st.plotly_chart(fig_trend, use_container_width=True)
+                else:
+                    st.write("Collecting data for trend chart... Please wait for the next refresh.")
+                
+                if not per_min_df.empty and per_min_df["Active Users"].sum() > 0:
+                    st.subheader("Total Active Users per Minute (All Marketers)")
+                    fig_bar = px.bar(per_min_df, x="Time", y="Active Users", template="plotly_dark", color_discrete_sequence=['#4A90E2'])
+                    fig_bar.update_layout(xaxis_title=None, yaxis_title="Active Users", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), xaxis=dict(tickangle=-90))
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                
+                st.divider()
+                st.subheader("Page and screen in last 30 minutes")
+                can_view_all = (effective_user_info['role'] == 'admin' or effective_user_info.get('can_view_all_realtime_data', False))
+                pages_to_display = pages_df_full
+                if not can_view_all:
+                    marketer_id = effective_user_info['marketer_id']
+                    pages_to_display = pages_df_full[pages_df_full['Marketer'] == marketer_id]
+                
+                if not pages_to_display.empty:
+                    pages_to_display = pages_to_display.copy()
+                    if 'LastPurchaseTime' in pages_to_display.columns:
+                        purchase_times_utc = pd.to_datetime(pages_to_display['LastPurchaseTime'], utc=True, errors='coerce')
+                        
+                        valid_times = purchase_times_utc.notna()
+                        pages_to_display['Last Purchase Time'] = pd.Series(dtype='str')
+                        if valid_times.any():
+                            pages_to_display.loc[valid_times, 'Last Purchase Time'] = purchase_times_utc[valid_times].dt.tz_convert(selected_tz).dt.strftime('%H:%M:%S')
+                        pages_to_display['Last Purchase Time'] = pages_to_display['Last Purchase Time'].fillna("—")
+                        
+                        final_columns_order = [
+                            "Page Title and Screen Class", "Marketer", "Active Users", 
+                            "Purchases", "Last Purchase Time", "Revenue", "CR"
+                        ]
+                        pages_to_display = pages_to_display[final_columns_order]
+
+                    st.dataframe(
+                        pages_to_display.style.format({
+                            'CR': "{:.2f}%", 'Revenue': "${:,.2f}"
+                        }).apply(
+                            lambda x: x.map(highlight_metrics) if x.name in ['Purchases', 'Revenue', 'CR', 'Last Purchase Time'] else [''] * len(x), axis=0
+                        ), 
+                        use_container_width=True,
+                        column_config={
+                            "Page Title and Screen Class": st.column_config.TextColumn("Page Title", width="large"),
+                            "Last Purchase Time": st.column_config.TextColumn("Last Purchase", width="small"),
+                        }
+                    )
+                else:
+                    st.write("No data available for your user.")
+                if debug_mode:
+                    st.divider(); st.subheader("🕵️‍♂️ Debug Mode: Realtime Data Flow")
+                    with st.expander("1. Raw Data from APIs"):
+                        st.write("GA (Traffic):"); st.dataframe(ga_raw_df); st.code(ga_raw_df.to_json(orient='records', indent=2))
+                        st.write("Shopify (Purchases):"); st.dataframe(shopify_raw_df); st.code(shopify_raw_df.to_json(orient='records', indent=2))
+                    with st.expander("2. Processed Data (before merge)"):
+                        st.write("GA Processed:"); st.dataframe(ga_processed_df); st.code(ga_processed_df.to_json(orient='records', indent=2))
+                        st.write("Shopify Processed & Grouped:"); 
+                        shopify_grouped_debug = shopify_purchases_df_processed.groupby(['core_title', 'symbol']).agg(Purchases=('Purchases', 'sum'), Revenue=('Revenue', 'sum'), LastPurchaseTime=('created_at', 'max')).reset_index()
+                        st.dataframe(shopify_grouped_debug); st.code(shopify_grouped_debug.to_json(orient='records', indent=2))
+                    with st.expander("3. Merged Data"):
+                        st.dataframe(merged_df); st.code(merged_df.to_json(orient='records', indent=2))
+                    with st.expander("4. Purchase Events for Chart"):
+                        st.write("List of events passed to chart renderer:"); st.json(json.dumps(purchase_events, default=str))
 
         for seconds in range(refresh_interval, 0, -1):
             timer_placeholder.markdown(f'<p style="color:green;"><b>Next refresh in: {seconds} seconds...</b></p>', unsafe_allow_html=True); time.sleep(1)
