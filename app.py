@@ -20,6 +20,7 @@ import base64
 from supabase import create_client, Client
 from urllib.parse import urlparse
 import random
+from streamlit_extras.let_it_rain import rain
 
 from notification_manager import NotificationManager
 
@@ -206,7 +207,7 @@ def fetch_realtime_data():
                         purchase_events.append({
                             'timestamp': timestamp,
                             'Marketer': marketer,
-                            'symbol': product_symbol
+                            'symbol': f"{product_symbol}{marketer}"
                         })
 
         ga_pages_df_processed = ga_pages_df.copy()
@@ -363,6 +364,15 @@ else:
     effective_user_info = dict(st.session_state['user_info'])
     avatar_url = effective_user_info.get("avatar_url") or default_avatar_url
     
+    # Đọc các cài đặt từ cookies
+    try:
+        rain_duration = int(cookies.get('rain_duration', 30))
+    except (ValueError, TypeError):
+        rain_duration = 30
+    rain_emoji = cookies.get('rain_emoji', '💰')
+    rain_enabled = cookies.get('rain_enabled', 'True') == 'True'
+
+
     banner_placeholder = st.empty()
     if 'banner_notification' in st.session_state:
         with banner_placeholder.container():
@@ -371,9 +381,9 @@ else:
                 del st.session_state.banner_notification
                 st.rerun()
 
-    if st.session_state.get('show_celebration', False):
-        if time.time() - st.session_state.get('celebration_start_time', 0) < 30:
-            st.balloons()
+    if rain_enabled and st.session_state.get('show_celebration', False):
+        if time.time() - st.session_state.get('celebration_start_time', 0) < rain_duration:
+            rain(emoji=rain_emoji, falling_speed=5, animation_length="infinite")
         else:
             del st.session_state.show_celebration
             if 'celebration_start_time' in st.session_state:
@@ -406,19 +416,53 @@ else:
                 
                 marketer_list = sorted(list(set(page_title_map.values())))
                 
-                selected_marketer = st.selectbox(
-                    "Select Marketer to simulate for:",
-                    options=marketer_list
+                selected_marketers = st.multiselect(
+                    "Select Marketers to simulate for:",
+                    options=marketer_list,
+                    default=marketer_list[0] if marketer_list else None
                 )
+
+                st.subheader("Rain Effect Settings")
+                new_rain_enabled = st.checkbox("Enable Rain Effect", value=rain_enabled)
+                if new_rain_enabled != rain_enabled:
+                    cookies['rain_enabled'] = str(new_rain_enabled)
+                    cookies.save()
+                    st.rerun()
+
+                new_rain_emoji = st.text_input(
+                    "Rain Emoji",
+                    value=rain_emoji,
+                    max_chars=2,
+                    help="Enter a single emoji for the celebration effect."
+                )
+                if new_rain_emoji != rain_emoji:
+                    cookies['rain_emoji'] = new_rain_emoji
+                    cookies.save()
+                    st.rerun()
                 
+                new_rain_duration = st.number_input(
+                    "Rain Effect Duration (seconds)", 
+                    min_value=10, 
+                    value=rain_duration, 
+                    step=5
+                )
+                if new_rain_duration != rain_duration:
+                    cookies['rain_duration'] = str(new_rain_duration)
+                    cookies.save()
+                    st.rerun()
+
                 if st.button("Simulate New Sale", use_container_width=True):
-                    st.session_state.mock_order = {
-                        'id': f"mock_{int(time.time())}",
-                        'marketer': selected_marketer,
-                        'total_revenue': round(random.uniform(25.5, 199.9), 2),
-                        'products': ["Simulated Awesome Product"],
-                        'timestamp': datetime.now(timezone.utc)
-                    }
+                    mock_orders = []
+                    for marketer in selected_marketers:
+                        mock_product_name = "128 Hz Healing Instrument"
+                        mock_orders.append({
+                            'id': f"mock_{int(time.time())}_{marketer}",
+                            'marketer': marketer,
+                            'total_revenue': round(random.uniform(25.5, 199.9), 2),
+                            'products': [mock_product_name],
+                            'timestamp': datetime.now(timezone.utc)
+                        })
+                    st.session_state.mock_orders = mock_orders
                     st.rerun()
 
     if page == "Profile":
@@ -473,15 +517,16 @@ else:
             else:
                 (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_purchases_df_processed, merged_df, purchase_events, order_details) = fetch_result
                 
-                if 'mock_order' in st.session_state:
-                    mock_data = st.session_state['mock_order']
-                    order_details.append(mock_data)
-                    purchase_events.append({
-                        'timestamp': mock_data['timestamp'],
-                        'Marketer': mock_data['marketer'],
-                        'symbol': '🧪'
-                    })
-                    del st.session_state['mock_order']
+                if 'mock_orders' in st.session_state:
+                    mock_data_list = st.session_state.get('mock_orders', [])
+                    for mock_data in mock_data_list:
+                        order_details.append(mock_data)
+                        purchase_events.append({
+                            'timestamp': mock_data['timestamp'],
+                            'Marketer': mock_data['marketer'],
+                            'symbol': f"🧪{mock_data['marketer']}"
+                        })
+                    del st.session_state['mock_orders']
 
                 notification_manager.check_for_new_sales(order_details)
 
@@ -550,16 +595,10 @@ else:
                                     fig_trend.add_trace(go.Scatter(
                                         x=marketer_events['timestamp'],
                                         y=events_y,
-                                        mode='markers+text',
+                                        mode='text',
                                         text=marketer_events['symbol'],
-                                        textposition='middle center',
-                                        textfont=dict(size=16, color='white'),
-                                        marker=dict(
-                                            color='rgba(0, 0, 0, 0.6)',
-                                            size=22,
-                                            symbol='circle',
-                                            line=dict(width=0)
-                                        ),
+                                        textposition='top center',
+                                        textfont=dict(size=12, color='#FFFFFF'),
                                         hoverinfo='none',
                                         showlegend=False
                                     ))
@@ -591,10 +630,12 @@ else:
                 if not pages_to_display.empty:
                     pages_to_display = pages_to_display.copy()
                     if 'LastPurchaseTime' in pages_to_display.columns:
-                        # SỬA LỖI: Luôn đảm bảo dữ liệu là datetime UTC trước khi chuyển đổi
                         purchase_times_utc = pd.to_datetime(pages_to_display['LastPurchaseTime'], utc=True, errors='coerce')
-                        purchase_times_local = purchase_times_utc.dt.tz_convert(selected_tz)
-                        pages_to_display['Last Purchase Time'] = purchase_times_local.dt.strftime('%H:%M:%S')
+                        
+                        valid_times = purchase_times_utc.notna()
+                        pages_to_display['Last Purchase Time'] = pd.Series(dtype='str')
+                        if valid_times.any():
+                            pages_to_display.loc[valid_times, 'Last Purchase Time'] = purchase_times_utc[valid_times].dt.tz_convert(selected_tz).dt.strftime('%H:%M:%S')
                         pages_to_display['Last Purchase Time'] = pages_to_display['Last Purchase Time'].fillna("—")
                         
                         final_columns_order = [
