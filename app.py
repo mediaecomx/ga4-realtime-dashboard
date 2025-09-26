@@ -169,7 +169,6 @@ def fetch_realtime_data():
         per_min_df = pd.DataFrame([{"Time": f"-{int(k)} min", "Active Users": v} for k, v in sorted(per_min_data.items(), key=lambda item: int(item[0]))])
         shopify_purchases_df, purchase_count_30min = fetch_shopify_realtime_purchases_rest()
         
-        # TẠO DANH SÁCH CÁC SỰ KIỆN MUA HÀNG ĐỂ VẼ LÊN BIỂU ĐỒ
         purchase_events = []
         if not shopify_purchases_df.empty:
             for _, purchase in shopify_purchases_df.iterrows():
@@ -178,7 +177,6 @@ def fetch_realtime_data():
                 timestamp = pd.to_datetime(purchase['created_at'])
                 quantity = purchase['Purchases']
                 
-                # Tìm biểu tượng tương ứng với sản phẩm
                 product_symbol = None
                 for name_part, symbol in product_symbol_map.items():
                     if name_part in title:
@@ -186,7 +184,6 @@ def fetch_realtime_data():
                         break
                 
                 if marketer and product_symbol:
-                    # Nếu một đơn hàng có nhiều sản phẩm, tạo nhiều sự kiện
                     for _ in range(quantity):
                         purchase_events.append({
                             'timestamp': timestamp,
@@ -215,7 +212,6 @@ def fetch_realtime_data():
         else:
             final_pages_df, merged_df = pd.DataFrame(), pd.DataFrame()
         now_in_utc = datetime.now(pytz.utc)
-        # TRẢ VỀ THÊM `purchase_events`
         return active_users_5min, active_users_30min, total_views, purchase_count_30min, final_pages_df, per_min_df, now_in_utc, ga_pages_df, shopify_purchases_df, ga_pages_df_processed, shopify_purchases_df_processed, merged_df, purchase_events
     except Exception as e:
         return None, None, None, None, None, None, str(e), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
@@ -416,7 +412,6 @@ else:
             if fetch_result[0] is None:
                 st.error(f"Error fetching data: {fetch_result[6]}")
             else:
-                # NHẬN THÊM `purchase_events`
                 (active_users_5min, active_users_30min, total_views, purchase_count_30min, pages_df_full, per_min_df, utc_fetch_time, ga_raw_df, shopify_raw_df, ga_processed_df, shopify_processed_df, merged_final_df, purchase_events) = fetch_result
                 localized_fetch_time = utc_fetch_time.astimezone(selected_tz)
                 st.markdown(f"*Last update: {localized_fetch_time.strftime('%Y-%m-%d %H:%M:%S')}*")
@@ -458,35 +453,43 @@ else:
                     fig_trend = px.line(history_df_melted, x='timestamp', y='Active Users', color='Marketer', template='plotly_dark', color_discrete_sequence=px.colors.qualitative.Plotly)
                     fig_trend.update_traces(line=dict(width=3))
                     
-                    # LOGIC MỚI: THÊM BIỂU TƯỢNG ĐƠN HÀNG VÀO BIỂU ĐỒ
+                    # --- BẮT ĐẦU LOGIC MỚI, MẠNH MẼ HƠN ĐỂ VẼ BIỂU TƯỢNG ---
                     if purchase_events and not history_df.empty:
                         events_df = pd.DataFrame(purchase_events)
                         events_df['timestamp'] = events_df['timestamp'].dt.tz_convert(selected_tz)
                         
-                        y_values = []
-                        for _, event in events_df.iterrows():
-                            marketer = event['Marketer']
-                            timestamp = event['timestamp']
+                        for marketer in events_df['Marketer'].unique():
                             if marketer in history_df.columns:
-                                # Tìm giá trị user gần nhất tại thời điểm có đơn hàng
-                                user_count = history_df.asof(timestamp)[marketer]
-                                y_values.append(user_count)
-                            else:
-                                y_values.append(np.nan)
-                        events_df['y'] = y_values
-                        events_df.dropna(subset=['y'], inplace=True)
+                                marketer_history = history_df[marketer].dropna()
+                                if len(marketer_history) < 2: continue
 
-                        fig_trend.add_trace(go.Scatter(
-                            x=events_df['timestamp'],
-                            y=events_df['y'],
-                            mode='text',
-                            text=events_df['symbol'],
-                            textposition='top center',
-                            textfont=dict(size=16, color='white'),
-                            hoverinfo='none',
-                            showlegend=False
-                        ))
+                                marketer_events = events_df[events_df['Marketer'] == marketer]
+                                
+                                history_x_numeric = marketer_history.index.astype(np.int64)
+                                history_y = marketer_history.values
+                                events_x_numeric = marketer_events['timestamp'].astype(np.int64)
 
+                                # Sử dụng nội suy để tìm vị trí Y chính xác trên đường kẻ
+                                events_y = np.interp(events_x_numeric, history_x_numeric, history_y)
+
+                                fig_trend.add_trace(go.Scatter(
+                                    x=marketer_events['timestamp'],
+                                    y=events_y,
+                                    mode='markers+text',
+                                    text=marketer_events['symbol'],
+                                    textposition='middle center',
+                                    textfont=dict(size=16, color='white'),
+                                    marker=dict(
+                                        color='rgba(0, 0, 0, 0.6)', # Nền đen mờ
+                                        size=22,
+                                        symbol='circle',
+                                        line=dict(width=0)
+                                    ),
+                                    hoverinfo='none',
+                                    showlegend=False
+                                ))
+                    # --- KẾT THÚC LOGIC MỚI ---
+                    
                     fig_trend.update_layout(
                         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
                         yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), legend_title_text='',
