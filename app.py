@@ -137,7 +137,7 @@ def render_progress_bar(value, total):
     st.progress(percentage / 100)
 
 # --- CÁC HÀM LẤY DỮ LIỆU ---
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def fetch_shopify_realtime_purchases_rest():
     try:
         thirty_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -162,7 +162,7 @@ def fetch_shopify_realtime_purchases_rest():
         return df, df['Purchases'].sum()
     except Exception: return pd.DataFrame(columns=["Product Title", "Purchases", "Revenue"]), 0
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def fetch_realtime_data():
     try:
         request = RunRealtimeReportRequest(
