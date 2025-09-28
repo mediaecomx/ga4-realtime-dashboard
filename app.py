@@ -20,7 +20,7 @@ from supabase import create_client, Client
 from urllib.parse import urlparse
 
 # --- CẤU HÌNH CHUNG ---
-PROPERTY_ID = "501726461"
+PROPERTY_ID = ""
 HOURLY_TOKEN_QUOTA = 5000
 DAILY_TOKEN_QUOTA = 25000
 
@@ -579,3 +579,4 @@ else:
                         with st.expander("4. Final Data (Grouped, with Marketer, Sorted)"):
                             st.dataframe(all_data_df); st.code(all_data_df.to_json(orient='records', indent=2))
                 else: st.write("No page data found with sessions in the selected date range.")
+
